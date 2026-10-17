@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Local sign-in reference containing private credentials.
+/login.txt
+
 # Python virtual environments and caches
 .venv/
 venv/

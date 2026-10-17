@@ -49,7 +49,15 @@ Set a persistent `SECRET_KEY`; otherwise sessions expire when the app restarts. 
 4. Record a sale and view its receipt.
 5. Return to the dashboard to see totals and stock alerts.
 
-No sample records or default accounts are hard-coded. Quantities are whole units. Currency defaults to UGX and can be changed with `CURRENCY`. A purchase records stock already received; a sale is immediately paid. Credit, refunds, taxes, and discounts are outside scope. Transaction history is read-only. Opening stock is entered once on product creation; purchases and sales then change stock.
+The normal setup does not insert sample records. To add fictional presentation data, run:
+
+```powershell
+backend/.venv/Scripts/python.exe backend/seed_demo.py
+```
+
+This adds 12 products marked `(Demo)`, 4 fictional suppliers, 12 received purchases, and 8 sales marked `Demo:`. It uses six categories, reusing existing category names. Existing records and accounts are preserved. Running it again skips the import if demo sales already exist. Demo stock starts at zero and is explained by purchases minus sales, including a few low-stock products. Sample prices are illustrative UGX amounts. It uses existing active Admin and Sales accounts without changing their passwords.
+
+Quantities are whole units. Currency defaults to UGX and can be changed with `CURRENCY`. A purchase records stock already received; a sale is immediately paid. Credit, refunds, taxes, and discounts are outside scope. Transaction history is read-only. Opening stock is entered once on product creation; purchases and sales then change stock.
 
 ## Seven tables
 

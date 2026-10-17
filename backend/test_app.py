@@ -388,6 +388,29 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.login('setup.admin', 'bootstrap-password', 'Admin').status_code, 302)
         self.assertEqual(self.client.get('/employees.html').status_code, 200)
 
+    def test_demo_seed_preserves_records_balances_stock_and_skips_repeat(self):
+        from seed_demo import seed_demo
+        with patch('seed_demo.connection_settings', return_value=self.mysql):
+            seed_demo()
+            with self.app.app_context():
+                before = {table: query(f'SELECT COUNT(*) AS n FROM {table}', one=True)['n']
+                          for table in ('employees', 'categories', 'suppliers', 'products', 'purchases', 'sales', 'sale_items')}
+                self.assertEqual(before['products'], 14)
+                self.assertEqual(before['employees'], 2)
+                self.assertEqual(before['purchases'], 12)
+                self.assertEqual(before['sales'], 8)
+                rows = query("SELECT p.stock, (SELECT SUM(quantity) FROM purchases WHERE product_id=p.id) AS received, "
+                             "(SELECT COALESCE(SUM(quantity),0) FROM sale_items WHERE product_id=p.id) AS sold "
+                             "FROM products p WHERE p.name LIKE %s", ('% (Demo)',))
+                self.assertEqual(len(rows), 12)
+                for row in rows:
+                    self.assertEqual(row['stock'], row['received'] - row['sold'])
+            seed_demo()
+            with self.app.app_context():
+                after = {table: query(f'SELECT COUNT(*) AS n FROM {table}', one=True)['n'] for table in before}
+                self.assertEqual(before, after)
+        self.assertEqual(self.read('SELECT stock FROM products WHERE id=%s', (self.product,))['stock'], 10)
+
 
 if __name__ == '__main__':
     unittest.main()
