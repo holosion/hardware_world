@@ -70,7 +70,7 @@ Flask reads prices from MySQL. Each sale item keeps its historical price, so cha
 
 **How do you prevent SQL injection?** Queries use `%s` placeholders and pass values separately to PyMySQL.
 
-**How does login work?** Flask finds the active employee by email and verifies the password hash. It stores the employee ID in a signed session cookie and checks the account is still active on each request.
+**How does login work?** The user selects a department and enters their username and password. Flask finds the active employee by unique username, checks the selected department matches the saved role, and verifies the password hash. It stores the employee ID in a signed session cookie and checks the account is still active on each request.
 
 **Are passwords plain text?** No. Werkzeug creates and verifies password hashes.
 
@@ -82,7 +82,11 @@ Flask reads prices from MySQL. Each sale item keeps its historical price, so cha
 
 **Can Purchasing see sales?** No. Its dashboard shows stock information and purchasing links. Sales totals, history, and receipts are restricted to Admin and Sales.
 
-**How do I assign a department?** An Admin opens Employees and selects Sales or Purchasing as the employee's role. The employee cannot set their own role on the sign-in page. If an Admin changes their role, the new access applies on the next request.
+**How do I assign a department?** An Admin opens Employees and selects Sales or Purchasing as the employee's role. The employee selects a department on the sign-in page, but it must match their saved role. Selecting Admin does not give them Admin access. If an Admin changes their role, the new access applies on the next request.
+
+**Where are employee accounts stored?** In the MySQL `employees` table: ID, full name, unique username, optional email, password hash, department role, and active status. Admins create accounts on the Employees page. There is no public sign-up.
+
+**Why usernames instead of emails?** Each employee has a short, unique login name assigned by the Admin. Email is optional contact information. Passwords are still hashed.
 
 **Why no department table?** This version needs only three fixed access groups. A single role column keeps the schema small and easy to explain.
 

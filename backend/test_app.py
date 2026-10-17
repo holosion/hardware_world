@@ -4,6 +4,7 @@ import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+from unittest.mock import patch
 
 from werkzeug.security import generate_password_hash
 
@@ -32,10 +33,10 @@ class StoreTests(unittest.TestCase):
         with self.app.app_context():
             for table in ('sale_items', 'sales', 'purchases', 'products', 'categories', 'suppliers', 'employees'):
                 execute(f'DELETE FROM {table}')
-            self.admin = execute('INSERT INTO employees (name,email,password_hash,role) VALUES (%s,%s,%s,%s)',
-                                 ('Test Admin', 'admin@example.test', generate_password_hash('test-password'), 'Admin'))
-            self.staff = execute('INSERT INTO employees (name,email,password_hash,role) VALUES (%s,%s,%s,%s)',
-                                 ('Test Staff', 'staff@example.test', generate_password_hash('test-password'), 'Sales'))
+            self.admin = execute('INSERT INTO employees (name,username,email,password_hash,role) VALUES (%s,%s,%s,%s,%s)',
+                                 ('Test Admin', 'admin', 'admin@example.test', generate_password_hash('test-password'), 'Admin'))
+            self.staff = execute('INSERT INTO employees (name,username,email,password_hash,role) VALUES (%s,%s,%s,%s,%s)',
+                                 ('Test Staff', 'staff', 'staff@example.test', generate_password_hash('test-password'), 'Sales'))
             self.category = execute('INSERT INTO categories (name) VALUES (%s)', ('Tools',))
             self.supplier = execute('INSERT INTO suppliers (name) VALUES (%s)', ('Test Supplier',))
             self.product = execute('INSERT INTO products (name,category_id,price,stock) VALUES (%s,%s,%s,%s)',
@@ -53,8 +54,9 @@ class StoreTests(unittest.TestCase):
         values['csrf_token'] = token
         return self.client.post(path, data=values, follow_redirects=follow_redirects)
 
-    def login(self, email='admin@example.test', password='test-password'):
-        return self.post('/login', {'email': email, 'password': password})
+    def login(self, username='admin', password='test-password', department=None):
+        department = department or ('Admin' if username == 'admin' else 'Purchasing' if username == 'buyer' else 'Sales')
+        return self.post('/login', {'username': username, 'password': password, 'department': department})
 
     def read(self, sql, params=()):
         with self.app.app_context():
@@ -151,16 +153,16 @@ class StoreTests(unittest.TestCase):
         self.post('/logout')
         self.assertEqual(self.client.get('/products.html').status_code, 302)
         response = self.login(password='wrong')
-        self.assertIn(b'Incorrect email or password', response.data)
-        self.assertEqual(self.client.post('/login', data={'email': 'admin@example.test'}).status_code, 400)
-        self.login('staff@example.test')
+        self.assertIn(b'Incorrect department, username, or password', response.data)
+        self.assertEqual(self.client.post('/login', data={'username': 'admin', 'department': 'Admin'}).status_code, 400)
+        self.login('staff')
         self.assertEqual(self.client.get('/employees.html').status_code, 403)
         self.assertEqual(self.post(f'/employees/{self.admin}/toggle').status_code, 403)
         self.assertEqual(self.client.get('/sales.html').status_code, 200)
 
     def test_deactivation_blocks_existing_session_and_self_deactivation_is_rejected(self):
         self.assertEqual(self.post(f'/employees/{self.admin}/toggle').status_code, 400)
-        self.login('staff@example.test')
+        self.login('staff')
         with self.app.app_context():
             execute('UPDATE employees SET active=0 WHERE id=%s', (self.staff,))
             get_db().commit()
@@ -171,14 +173,14 @@ class StoreTests(unittest.TestCase):
                              'password': 'a-new-password', 'confirm_password': 'a-new-password'})
         self.assertEqual(response.status_code, 302)
         self.post('/logout')
-        self.assertIn(b'Incorrect email or password', self.login().data)
+        self.assertIn(b'Incorrect department, username, or password', self.login().data)
         self.assertEqual(self.login(password='a-new-password').status_code, 302)
 
     def test_supplier_and_category_forms_and_employee_creation(self):
         self.assertEqual(self.post('/categories.html', {'name': 'Plumbing'}).status_code, 302)
         self.assertEqual(self.post('/suppliers.html', {'name': 'New Supplier', 'phone': '0700000000',
                                                      'email': 'supplier@example.test'}).status_code, 302)
-        self.assertEqual(self.post('/employees.html', {'name': 'New Staff', 'email': 'new@example.test',
+        self.assertEqual(self.post('/employees.html', {'name': 'New Staff', 'username': 'newstaff', 'email': 'new@example.test',
                              'role': 'Sales', 'password': 'new-password'}).status_code, 302)
         employee = self.read('SELECT * FROM employees WHERE email=%s', ('new@example.test',))
         self.assertNotEqual(employee['password_hash'], 'new-password')
@@ -191,7 +193,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.read('SELECT COUNT(*) AS n FROM employees')['n'], 2)
 
     def test_sales_cannot_manage_stock_purchases_or_accounts(self):
-        self.login('staff@example.test')
+        self.login('staff')
         page = self.client.get('/products.html?edit=' + str(self.product))
         self.assertEqual(page.status_code, 200)
         self.assertNotIn(b'Save product', page.data)
@@ -216,9 +218,9 @@ class StoreTests(unittest.TestCase):
     def test_purchasing_can_receive_stock_but_cannot_access_sales(self):
         self.post('/sales.html', {'product_id': str(self.product), 'quantity': '1'})
         sale_id = self.read('SELECT id FROM sales')['id']
-        self.assertEqual(self.post('/employees.html', {'name': 'Buyer', 'email': 'buyer@example.test',
+        self.assertEqual(self.post('/employees.html', {'name': 'Buyer', 'username': 'buyer', 'email': 'buyer@example.test',
                              'role': 'Purchasing', 'password': 'buyer-password'}).status_code, 302)
-        self.assertEqual(self.login('buyer@example.test', 'buyer-password').status_code, 302)
+        self.assertEqual(self.login('buyer', 'buyer-password').status_code, 302)
         dashboard = self.client.get('/')
         self.assertEqual(dashboard.status_code, 200)
         self.assertIn(b'Purchasing workspace', dashboard.data)
@@ -246,13 +248,13 @@ class StoreTests(unittest.TestCase):
         with department_client.session_transaction() as session:
             session['user_id'] = self.staff
         self.assertEqual(department_client.get('/sales.html').status_code, 200)
-        self.assertEqual(self.post('/employees.html', {'id': self.staff, 'name': 'Buyer',
+        self.assertEqual(self.post('/employees.html', {'id': self.staff, 'name': 'Buyer', 'username': 'staff',
                          'email': 'staff@example.test', 'role': 'Purchasing'}).status_code, 302)
         self.assertEqual(department_client.get('/sales.html').status_code, 403)
         self.assertEqual(department_client.get('/purchase-orders.html').status_code, 200)
-        self.assertEqual(self.post('/employees.html', {'id': self.admin, 'name': 'Admin',
+        self.assertEqual(self.post('/employees.html', {'id': self.admin, 'name': 'Admin', 'username': 'admin',
                          'email': 'admin@example.test', 'role': 'Sales'}).status_code, 400)
-        self.assertEqual(self.post('/employees.html', {'name': 'Invalid', 'email': 'invalid@example.test',
+        self.assertEqual(self.post('/employees.html', {'name': 'Invalid', 'username': 'invalid', 'email': 'invalid@example.test',
                          'role': 'Owner', 'password': 'test-password'}).status_code, 400)
 
     def test_legacy_staff_upgrade_preserves_accounts_and_business_records(self):
@@ -281,6 +283,110 @@ class StoreTests(unittest.TestCase):
             with client.session_transaction() as session:
                 session['user_id'] = self.admin
             self.assertEqual(client.get('/unlisted').status_code, 403)
+
+    def test_department_username_and_password_must_all_match(self):
+        self.post('/logout')
+        for data in (
+            {'username': 'staff', 'department': 'Admin', 'password': 'test-password'},
+            {'username': 'admin', 'department': 'Sales', 'password': 'test-password'},
+            {'username': 'staff', 'department': 'Purchasing', 'password': 'test-password'},
+            {'username': 'staff', 'department': 'Sales', 'password': 'wrong'},
+            {'username': 'admin', 'password': 'test-password'},
+            {'department': 'Admin', 'password': 'test-password'},
+            {'email': 'admin@example.test', 'department': 'Admin', 'password': 'test-password'},
+        ):
+            with self.subTest(data={key: value for key, value in data.items() if key != 'password'}):
+                response = self.post('/login', data)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(b'Incorrect department, username, or password', response.data)
+                with self.client.session_transaction() as session:
+                    self.assertNotIn('user_id', session)
+        self.assertEqual(self.login(' STAFF ', department='Sales').status_code, 302)
+        self.assertEqual(self.client.get('/sales.html').status_code, 200)
+
+    def test_admin_creates_username_account_without_email(self):
+        response = self.post('/employees.html', {'name': 'New Buyer', 'username': 'New.Buyer',
+                             'role': 'Purchasing', 'password': 'buyer-password'})
+        self.assertEqual(response.status_code, 302)
+        employee = self.read('SELECT * FROM employees WHERE username=%s', ('new.buyer',))
+        self.assertIsNone(employee['email'])
+        self.assertNotEqual(employee['password_hash'], 'buyer-password')
+        self.assertEqual(self.post('/employees.html', {'name': 'Second Buyer', 'username': 'buyer_two',
+                             'role': 'Purchasing', 'password': 'buyer-password'}).status_code, 302)
+        self.post('/logout')
+        self.assertEqual(self.login('NEW.BUYER', 'buyer-password', 'Purchasing').status_code, 302)
+        self.assertEqual(self.client.get('/purchase-orders.html').status_code, 200)
+        self.assertEqual(self.post('/employees.html', {'name': 'Forbidden', 'username': 'forbidden',
+                             'role': 'Admin', 'password': 'test-password'}).status_code, 403)
+        self.assertEqual(self.client.get('/signup.html').status_code, 404)
+        self.assertEqual(self.post('/signup.html', {'username': 'forbidden'}).status_code, 404)
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM employees')['n'], 4)
+
+    def test_invalid_and_duplicate_usernames_are_rejected(self):
+        for username in ('ad', 'bad username', '@admin', 'a'*51, 'ADMIN'):
+            with self.subTest(username=username):
+                response = self.post('/employees.html', {'name': 'Test', 'username': username,
+                                     'role': 'Sales', 'password': 'test-password'})
+                self.assertEqual(response.status_code, 400)
+        response = self.post('/employees.html', {'id': self.staff, 'name': 'Changed', 'username': 'admin',
+                             'role': 'Sales'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.read('SELECT username FROM employees WHERE id=%s', (self.staff,))['username'], 'staff')
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM employees')['n'], 2)
+
+    def test_username_change_and_deactivation_control_future_logins(self):
+        self.assertEqual(self.post('/employees.html', {'id': self.staff, 'name': 'Test Staff',
+                             'username': 'new.staff', 'role': 'Sales'}).status_code, 302)
+        self.post('/logout')
+        self.assertIn(b'Incorrect department', self.login('staff').data)
+        self.assertEqual(self.login('new.staff').status_code, 302)
+        self.assertIn(b'new.staff', self.client.get('/settings.html').data)
+        self.login('admin')
+        self.assertEqual(self.post(f'/employees/{self.staff}/toggle').status_code, 302)
+        self.post('/logout')
+        self.assertIn(b'Incorrect department', self.login('new.staff').data)
+        with self.client.session_transaction() as session:
+            self.assertNotIn('user_id', session)
+
+    def test_username_upgrade_preserves_passwords_and_resolves_collisions(self):
+        with self.app.app_context():
+            extra_id = execute('INSERT INTO employees (name,username,email,password_hash,role) VALUES (%s,%s,%s,%s,%s)',
+                               ('Other Staff', 'other', 'staff@other.test', generate_password_hash('other-password'), 'Sales'))
+            get_db().commit()
+            hashes = {row['id']: row['password_hash'] for row in query('SELECT id,password_hash FROM employees')}
+            execute('ALTER TABLE employees DROP COLUMN username')
+            execute('ALTER TABLE employees MODIFY email VARCHAR(150) NOT NULL')
+        with patch.dict('os.environ', {'ADMIN_USERNAME': 'admin'}):
+            for _ in range(2):
+                result = self.app.test_cli_runner().invoke(args=['init-db'])
+                self.assertEqual(result.exit_code, 0, result.output)
+        with self.app.app_context():
+            rows = query('SELECT id,username,password_hash FROM employees')
+            self.assertEqual({row['id']: row['password_hash'] for row in rows}, hashes)
+            self.assertEqual(len({row['username'] for row in rows}), 3)
+            self.assertTrue(query('SELECT username FROM employees WHERE id=%s', (extra_id,), one=True)['username'].startswith('staff_'))
+            self.assertEqual(query("SHOW COLUMNS FROM employees LIKE 'username'", one=True)['Null'], 'NO')
+            self.assertEqual(query("SHOW COLUMNS FROM employees LIKE 'email'", one=True)['Null'], 'YES')
+        self.post('/logout')
+        self.assertEqual(self.login('staff').status_code, 302)
+        self.assertEqual(self.read('SELECT stock FROM products WHERE id=%s', (self.product,))['stock'], 10)
+
+    def test_first_admin_is_created_with_username_and_optional_email(self):
+        with self.app.app_context():
+            execute('DELETE FROM employees')
+            get_db().commit()
+        with patch.dict('os.environ', {'ADMIN_NAME': 'Bootstrap Admin', 'ADMIN_USERNAME': 'setup.admin',
+                                      'ADMIN_PASSWORD': 'bootstrap-password', 'ADMIN_EMAIL': ''}):
+            result = self.app.test_cli_runner().invoke(args=['init-db'])
+        self.assertEqual(result.exit_code, 0, result.output)
+        employee = self.read('SELECT * FROM employees WHERE username=%s', ('setup.admin',))
+        self.assertEqual(employee['role'], 'Admin')
+        self.assertIsNone(employee['email'])
+        self.assertNotEqual(employee['password_hash'], 'bootstrap-password')
+        with self.client.session_transaction() as session:
+            session.clear()
+        self.assertEqual(self.login('setup.admin', 'bootstrap-password', 'Admin').status_code, 302)
+        self.assertEqual(self.client.get('/employees.html').status_code, 200)
 
 
 if __name__ == '__main__':

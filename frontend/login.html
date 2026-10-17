@@ -23,11 +23,22 @@
       <form method="post">
         {{ csrf() }}
         <label>
-          Email address<input type="email"
-       name="email"
+          Department
+          <select name="department" required autocomplete="off">
+            <option value="">Select your department</option>
+            {% for role in roles %}
+              <option value="{{ role }}"
+                      {{ 'selected' if request.form.get("department") == role else '' }}>{{ 'Administration (Admin)' if role == 'Admin' else role ~ ' department' }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          Username<input type="text"
+       name="username"
        autocomplete="username"
        required
-       maxlength="150">
+       maxlength="50"
+       value="{{ request.form.get('username', '') }}">
         </label>
         <label>
           Password<input type="password"

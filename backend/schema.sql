@@ -2,7 +2,8 @@
 CREATE TABLE IF NOT EXISTS employees (
     id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
-    email VARCHAR(150) NOT NULL UNIQUE,
+    username VARCHAR(50) NOT NULL UNIQUE,
+    email VARCHAR(150) NULL UNIQUE,
     password_hash VARCHAR(255) NOT NULL,
     role ENUM('Admin', 'Sales', 'Purchasing') NOT NULL DEFAULT 'Sales',
     active BOOLEAN NOT NULL DEFAULT TRUE

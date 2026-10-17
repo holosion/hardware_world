@@ -15,14 +15,24 @@
        value="{{ editing.name if editing else '' }}">
         </label>
         <label>
-          Email<input type="email"
+          Username<input type="text"
+       name="username"
+       minlength="3"
+       maxlength="50"
+       pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{2,49}"
+       autocomplete="off"
+       required
+       value="{{ editing.username if editing else '' }}">
+        </label>
+        <p class="muted small-text">Use 3-50 letters, numbers, dots, underscores or hyphens. Usernames are stored in lowercase.</p>
+        <label>
+          Email (optional)<input type="email"
        name="email"
        maxlength="150"
-       required
-       value="{{ editing.email if editing else '' }}">
+       value="{{ editing.email or '' if editing else '' }}">
         </label>
         <label>
-          Role<select name="role">
+          Department / role<select name="role">
           {% for role in roles %}
             <option {{ 'selected' if (editing.role if editing else 'Sales') == role else '' }}>{{ role }}</option>
           {% endfor %}
@@ -51,8 +61,9 @@
           <thead>
             <tr>
               <th>Name</th>
+              <th>Username</th>
               <th>Email</th>
-              <th>Role</th>
+              <th>Department</th>
               <th>Status</th>
               <th>Actions</th>
             </tr>
@@ -61,7 +72,8 @@
             {% for row in rows %}
               <tr>
                 <td>{{ row.name }}</td>
-                <td>{{ row.email }}</td>
+                <td>{{ row.username }}</td>
+                <td>{{ row.email or '-' }}</td>
                 <td>{{ row.role }}</td>
                 <td>
                   <span class="badge {{ 'good' if row.active else '' }}">{{ 'Active' if row.active else 'Inactive' }}</span>

@@ -76,6 +76,7 @@ def initialize(settings):
                 if statement.strip():
                     cursor.execute(statement)
             upgrade_roles(cursor)
+            upgrade_usernames(cursor)
         connection.commit()
 
 
@@ -92,3 +93,40 @@ def upgrade_roles(cursor):
     cursor.execute("UPDATE employees SET role='Sales' WHERE role='Staff'")
     cursor.execute("ALTER TABLE employees MODIFY role "
                    "ENUM('Admin','Sales','Purchasing') NOT NULL DEFAULT 'Sales'")
+
+
+def username_from_name(name):
+    """Make a readable initial username when upgrading an existing account."""
+    value = re.sub(r'[^a-z0-9_.-]+', '_', name.lower()).strip('_.-')[:50]
+    return value if len(value) >= 3 else 'employee'
+
+
+def upgrade_usernames(cursor):
+    """Preserve employee IDs, passwords, and transaction links during upgrade."""
+    cursor.execute("SHOW COLUMNS FROM employees LIKE 'username'")
+    column = cursor.fetchone()
+    if column is None:
+        cursor.execute('ALTER TABLE employees ADD username VARCHAR(50) NULL UNIQUE AFTER name')
+    cursor.execute('SELECT id, name, email, role, username FROM employees ORDER BY id')
+    employees = cursor.fetchall()
+    used = {row['username'].lower() for row in employees if row['username']}
+    for employee in employees:
+        if employee['username']:
+            continue
+        if employee['role'] == 'Admin':
+            source = os.getenv('ADMIN_USERNAME') or employee['name']
+        else:
+            source = (employee['email'] or employee['name']).split('@')[0]
+        base = username_from_name(source)
+        username, counter = base, 0
+        while username in used:
+            counter += 1
+            suffix = f'_{employee["id"]}' + (f'_{counter}' if counter > 1 else '')
+            username = base[:50-len(suffix)] + suffix
+        cursor.execute('UPDATE employees SET username=%s WHERE id=%s', (username, employee['id']))
+        used.add(username)
+    if column is None or column['Null'] == 'YES':
+        cursor.execute('ALTER TABLE employees MODIFY username VARCHAR(50) NOT NULL')
+    cursor.execute("SHOW COLUMNS FROM employees LIKE 'email'")
+    if cursor.fetchone()['Null'] != 'YES':
+        cursor.execute('ALTER TABLE employees MODIFY email VARCHAR(150) NULL')

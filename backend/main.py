@@ -1,5 +1,6 @@
 """Hardware World: HTML forms -> Flask routes -> parameterized MySQL queries."""
 import os
+import re
 import secrets
 from decimal import Decimal, InvalidOperation
 
@@ -8,7 +9,7 @@ import pymysql
 from flask import Flask, abort, flash, g, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from db import ROOT, close_db, connection_settings, execute, get_db, initialize, query
+from db import ROOT, close_db, connection_settings, execute, get_db, initialize, query, username_from_name
 from permissions import ROLES, allowed
 
 
@@ -16,6 +17,13 @@ def required(name, limit=100):
     value = request.form.get(name, '').strip()
     if not value or len(value) > limit:
         raise ValueError(f'{name.replace("_", " ").title()} is required (maximum {limit} characters).')
+    return value
+
+
+def valid_username(value):
+    value = value.strip().lower()
+    if not re.fullmatch(r'[a-z0-9][a-z0-9_.-]{2,49}', value):
+        raise ValueError('Username must be 3-50 characters: letters, numbers, dots, underscores or hyphens, starting with a letter or number.')
     return value
 
 
@@ -64,7 +72,7 @@ def create_app(test_config=None):
             if not secrets.compare_digest(token, session['csrf_token']):
                 abort(400, 'The form expired. Reload the page and try again.')
         if session.get('user_id'):
-            g.user = query('SELECT id, name, email, role FROM employees WHERE id=%s AND active=1',
+            g.user = query('SELECT id, name, username, email, role FROM employees WHERE id=%s AND active=1',
                            (session['user_id'],), one=True)
             if g.user is None:
                 session.clear()
@@ -112,14 +120,16 @@ def create_app(test_config=None):
     @app.route('/login.html', methods=['GET', 'POST'])
     def login():
         if request.method == 'POST':
-            email = required('email', 150)
-            employee = query('SELECT * FROM employees WHERE email=%s AND active=1', (email,), one=True)
-            if employee and check_password_hash(employee['password_hash'], request.form.get('password', '')):
+            username = request.form.get('username', '').strip().lower()
+            department = request.form.get('department', '')
+            employee = query('SELECT * FROM employees WHERE username=%s AND active=1', (username,), one=True)
+            if (employee and department in ROLES and employee['role'] == department
+                    and check_password_hash(employee['password_hash'], request.form.get('password', ''))):
                 session.clear()
                 session['user_id'] = employee['id']
                 session['csrf_token'] = secrets.token_hex(32)
                 return redirect(url_for('dashboard'))
-            flash('Incorrect email or password.', 'error')
+            flash('Incorrect department, username, or password.', 'error')
         return render_template('login.html', title='Sign in')
 
     @app.post('/logout')
@@ -291,31 +301,36 @@ def create_app(test_config=None):
     @app.route('/employees.html', methods=['GET', 'POST'])
     def employees():
         if request.method == 'POST':
-            name, email, role = required('name'), required('email', 150), required('role')
-            if '@' not in email or role not in ROLES:
-                raise ValueError('Provide a valid email and choose Admin, Sales, or Purchasing.')
+            name, role = required('name'), required('role')
+            username = valid_username(required('username', 50))
+            email = request.form.get('email', '').strip() or None
+            if (email and ('@' not in email or len(email) > 150)) or role not in ROLES:
+                raise ValueError('Choose Admin, Sales, or Purchasing and provide a valid email if used.')
+            record_id = integer('id', 1) if request.form.get('id') else None
+            duplicate = query('SELECT id FROM employees WHERE username=%s', (username,), one=True)
+            if duplicate and duplicate['id'] != record_id:
+                raise ValueError('That username is already in use. Choose another username.')
             password = request.form.get('password', '')
-            record_id = request.form.get('id')
             if password and len(password) < 8:
                 raise ValueError('Passwords must contain at least eight characters.')
             if record_id:
-                record_id = integer('id', 1)
                 if record_id == g.user['id'] and role != 'Admin':
                     raise ValueError('You cannot remove your own administrator access.')
-                execute('UPDATE employees SET name=%s, email=%s, role=%s WHERE id=%s', (name, email, role, record_id))
+                execute('UPDATE employees SET name=%s, username=%s, email=%s, role=%s WHERE id=%s',
+                        (name, username, email, role, record_id))
                 if password:
                     execute('UPDATE employees SET password_hash=%s WHERE id=%s', (generate_password_hash(password), record_id))
             else:
                 if not password:
                     raise ValueError('A password is required for a new employee.')
-                execute('INSERT INTO employees (name,email,role,password_hash) VALUES (%s,%s,%s,%s)',
-                        (name, email, role, generate_password_hash(password)))
+                execute('INSERT INTO employees (name,username,email,role,password_hash) VALUES (%s,%s,%s,%s,%s)',
+                        (name, username, email, role, generate_password_hash(password)))
             get_db().commit()
             flash('Employee saved.', 'success')
             return redirect(url_for('employees'))
-        editing = query('SELECT id,name,email,role FROM employees WHERE id=%s', (request.args.get('edit'),), one=True) if request.args.get('edit') else None
+        editing = query('SELECT id,name,username,email,role FROM employees WHERE id=%s', (request.args.get('edit'),), one=True) if request.args.get('edit') else None
         return render_template('employees.html', title='Employees', editing=editing,
-                               rows=query('SELECT id,name,email,role,active FROM employees ORDER BY name'))
+                               rows=query('SELECT id,name,username,email,role,active FROM employees ORDER BY name'))
 
     @app.post('/employees/<int:record_id>/toggle')
     def toggle_employee(record_id):
@@ -347,14 +362,17 @@ def create_app(test_config=None):
         initialize(app.config['MYSQL'])
         if not query('SELECT id FROM employees WHERE role=%s AND active=1 LIMIT 1', ('Admin',), one=True):
             name = os.getenv('ADMIN_NAME') or click.prompt('Administrator name')
-            email = os.getenv('ADMIN_EMAIL') or click.prompt('Administrator email')
+            username = valid_username(os.getenv('ADMIN_USERNAME') or username_from_name(name))
+            email = os.getenv('ADMIN_EMAIL') or None
             password = os.getenv('ADMIN_PASSWORD') or click.prompt('Administrator password', hide_input=True, confirmation_prompt=True)
-            if len(password) < 8 or '@' not in email:
-                raise click.ClickException('Set a valid ADMIN_EMAIL and an ADMIN_PASSWORD of at least eight characters.')
-            execute('INSERT INTO employees (name,email,password_hash,role) VALUES (%s,%s,%s,%s)',
-                    (name, email, generate_password_hash(password), 'Admin'))
+            if len(password) < 8 or (email and '@' not in email):
+                raise click.ClickException('Use an ADMIN_PASSWORD of at least eight characters and a valid ADMIN_EMAIL if provided.')
+            execute('INSERT INTO employees (name,username,email,password_hash,role) VALUES (%s,%s,%s,%s,%s)',
+                    (name, username, email, generate_password_hash(password), 'Admin'))
             get_db().commit()
         click.echo('Simplified MySQL database ready: ' + app.config['MYSQL']['database'])
+        admin = query("SELECT username FROM employees WHERE role='Admin' AND active=1 ORDER BY id LIMIT 1", one=True)
+        click.echo('Sign in with department Admin and username: ' + admin['username'])
 
     return app
 

@@ -8,11 +8,15 @@
         <dd>
           {{ user.name }}
         </dd>
-        <dt>Email</dt>
+        <dt>Username</dt>
         <dd>
-          {{ user.email }}
+          {{ user.username }}
         </dd>
-        <dt>Role</dt>
+        <dt>Email (optional)</dt>
+        <dd>
+          {{ user.email or '-' }}
+        </dd>
+        <dt>Department</dt>
         <dd>
           {{ user.role }}
         </dd>
