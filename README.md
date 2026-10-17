@@ -9,7 +9,7 @@ The `akena2` version uses **HTML, CSS, Flask, and MySQL**. It preserves the side
 - Receive purchases and automatically increase stock.
 - Record sales with up to three product lines, reduce stock, and view receipts.
 - Dashboard totals, recent sales, and low-stock alerts.
-- Admins manage employee accounts; Staff handle daily store operations.
+- Admins have full access. Sales and Purchasing employees have access to their department's work.
 
 Payroll, ledger, departments, branches, warehouses, approvals, credit accounts, automatic backups, and advanced permissions are outside this version.
 
@@ -55,7 +55,7 @@ No sample records or default accounts are hard-coded. Quantities are whole units
 
 | Table | Purpose |
 | --- | --- |
-| employees | Login, hashed password, Admin/Staff role, active status |
+| employees | Login, hashed password, Admin/Sales/Purchasing role, active status |
 | categories | Product groups |
 | suppliers | Supplier contacts |
 | products | Category, selling price, stock, reorder level |
@@ -82,6 +82,7 @@ Sales and stock changes commit together or roll back together. Row locks prevent
 | --- | --- |
 | backend/main.py | Flask routes, forms, login, business logic |
 | backend/db.py | MySQL connection and SQL helpers |
+| backend/permissions.py | Role access table shared by routes and templates |
 | backend/schema.sql | Seven tables and foreign keys |
 | backend/requirements.txt | Three direct dependencies |
 | backend/test_app.py | Integration tests using temporary MySQL schema |
@@ -89,6 +90,27 @@ Sales and stock changes commit together or roll back together. Row locks prevent
 | frontend/*.html | HTML page templates and forms |
 | frontend/assets/css/style.css | Styling and responsive layout |
 | PRESENTATION_GUIDE.md | Explanation, demo, and lecturer questions |
+
+## Roles and departments
+
+| Feature | Admin | Sales | Purchasing |
+| --- | --- | --- | --- |
+| Dashboard and own account/password | Yes | Yes | Yes |
+| View/search products and stock | Yes | Yes | Yes |
+| Add/edit/delete products | Yes | No | Yes |
+| Manage categories and suppliers | Yes | No | Yes |
+| Receive stock and view purchase history | Yes | No | Yes |
+| Record sales, view sales history and receipts | Yes | Yes | No |
+| Sales totals and recent sales on dashboard | Yes | Yes | No |
+| Manage employees, roles, and account status | Yes | No | No |
+
+Sign in as an Admin, open **Employees**, and choose **Sales** or **Purchasing** when creating or editing an employee. The employee signs in with their email and password; they cannot choose their own role at login. One role is stored directly on each employee, so no additional department or permission tables are needed.
+
+`backend/permissions.py` contains the access table. Before each request, Flask reads the employee's current role from MySQL and checks the requested page and HTTP method. Disallowed actions return **403**, including manually typed URLs and direct form submissions. Unknown roles and unlisted routes are denied. The same access table hides navigation links and editing controls. Role changes apply to already signed-in employees on their next request. Admins cannot demote or deactivate their own account.
+
+### Upgrade an existing installation
+
+Run `backend/.venv/Scripts/python.exe backend/main.py init-db`, then restart Flask. This preserves existing accounts and business records while updating the role column. Existing **Staff** accounts become **Sales** accounts; an Admin can reassign purchasing employees afterward. No extra database tables are added. New installations already use the three roles.
 
 ## Tests
 

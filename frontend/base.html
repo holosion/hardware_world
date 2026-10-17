@@ -22,12 +22,14 @@
           <p class="nav-label">OVERVIEW</p>
           <nav aria-label="Main navigation">
             {% for endpoint, symbol, label in [('dashboard','▦','Dashboard'),('products','▣','Products & inventory'),('categories','▤','Categories'),('suppliers','◇','Suppliers'),('purchases','↓','Purchases'),('sales','↑','Sales')] %}
-              <a href="{{ url_for(endpoint) }}"
-                 class="nav-link {{ 'active' if request.endpoint == endpoint else '' }}"
-                 {% if request.endpoint == endpoint %} aria-current="page" {% endif %}>
-                <span aria-hidden="true">{{ symbol }}</span>{{ label }}</a>
+              {% if can_access(endpoint) %}
+                <a href="{{ url_for(endpoint) }}"
+                   class="nav-link {{ 'active' if request.endpoint == endpoint else '' }}"
+                   {% if request.endpoint == endpoint %} aria-current="page" {% endif %}>
+                  <span aria-hidden="true">{{ symbol }}</span>{{ label }}</a>
+              {% endif %}
             {% endfor %}
-            {% if user.role == "Admin" %}
+            {% if can_access("employees") %}
               <p class="nav-label">MANAGEMENT</p>
               <a class="nav-link {{ 'active' if request.endpoint == 'employees' else '' }}"
                  href="{{ url_for('employees') }}">

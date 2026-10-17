@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS employees (
     name VARCHAR(100) NOT NULL,
     email VARCHAR(150) NOT NULL UNIQUE,
     password_hash VARCHAR(255) NOT NULL,
-    role ENUM('Admin', 'Staff') NOT NULL DEFAULT 'Staff',
+    role ENUM('Admin', 'Sales', 'Purchasing') NOT NULL DEFAULT 'Sales',
     active BOOLEAN NOT NULL DEFAULT TRUE
 ) ENGINE=InnoDB;
 

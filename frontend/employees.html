@@ -23,8 +23,8 @@
         </label>
         <label>
           Role<select name="role">
-          {% for role in ['Staff', 'Admin'] %}
-            <option {{ 'selected' if editing and editing.role == role else '' }}>{{ role }}</option>
+          {% for role in roles %}
+            <option {{ 'selected' if (editing.role if editing else 'Sales') == role else '' }}>{{ role }}</option>
           {% endfor %}
           </select>
         </label>
@@ -42,7 +42,7 @@
           {% endif %}
         </div>
       </form>
-      <p class="muted small-text">Staff manage stock, suppliers, purchases, and sales. Admins also manage employee accounts.</p>
+      <p class="muted small-text">Sales staff record sales and view stock. Purchasing staff manage products, categories, suppliers, and purchases. Admins have full access.</p>
     </section>
     <section class="panel">
       <h2>Employee accounts</h2>

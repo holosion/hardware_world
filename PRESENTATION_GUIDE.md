@@ -74,7 +74,17 @@ Flask reads prices from MySQL. Each sale item keeps its historical price, so cha
 
 **Are passwords plain text?** No. Werkzeug creates and verifies password hashes.
 
-**What are the roles?** Staff manage daily store operations. Admins also manage employee accounts.
+**What are the roles?** Admin has full access and manages employee accounts. Sales records sales, views receipts, and reads product stock. Purchasing manages products, categories, suppliers, and received purchases. Everyone can access their own account and dashboard.
+
+**How is role-based access enforced?** Each employee has one role in the employees table. `permissions.py` maps roles to allowed pages and HTTP methods. Flask checks this table before running a route and returns 403 for disallowed actions. The same table controls which links and buttons the templates show. Hiding a link alone would not protect the server.
+
+**Can Sales edit products?** No. GET requests can read the catalogue, but POST requests that change products are blocked. The product form and edit/delete actions are also hidden.
+
+**Can Purchasing see sales?** No. Its dashboard shows stock information and purchasing links. Sales totals, history, and receipts are restricted to Admin and Sales.
+
+**How do I assign a department?** An Admin opens Employees and selects Sales or Purchasing as the employee's role. The employee cannot set their own role on the sign-in page. If an Admin changes their role, the new access applies on the next request.
+
+**Why no department table?** This version needs only three fixed access groups. A single role column keeps the schema small and easy to explain.
 
 **What is CSRF protection?** Each form has a random token tied to its session. Flask rejects POST requests without a matching token.
 
@@ -94,6 +104,7 @@ Flask reads prices from MySQL. Each sale item keeps its historical price, so cha
 4. Sell 3; show the receipt and stock of 12.
 5. Attempt to sell more than 12; explain validation and rollback.
 6. Show the records in Workbench.
-7. Open `products()` and its template to explain the code.
+7. Sign in as Sales and show that product editing and purchases are unavailable. Sign in as Purchasing and show that sales are unavailable.
+8. Open `permissions.py`, `products()`, and the product template to explain the access check.
 
 Practise changing a product name and explaining its SQL query. Understanding a small flow is more useful than memorizing the codebase.

@@ -2,7 +2,6 @@
 import os
 import secrets
 from decimal import Decimal, InvalidOperation
-from functools import wraps
 
 import click
 import pymysql
@@ -10,6 +9,7 @@ from flask import Flask, abort, flash, g, redirect, render_template, request, se
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from db import ROOT, close_db, connection_settings, execute, get_db, initialize, query
+from permissions import ROLES, allowed
 
 
 def required(name, limit=100):
@@ -41,25 +41,6 @@ def money(name):
         raise ValueError(f'{name.replace("_", " ").title()} must be a positive amount or zero, with at most two decimal places.')
 
 
-def login_required(view):
-    @wraps(view)
-    def wrapped(*args, **kwargs):
-        if g.user is None:
-            return redirect(url_for('login'))
-        return view(*args, **kwargs)
-    return wrapped
-
-
-def admin_required(view):
-    @wraps(view)
-    @login_required
-    def wrapped(*args, **kwargs):
-        if g.user['role'] != 'Admin':
-            abort(403)
-        return view(*args, **kwargs)
-    return wrapped
-
-
 def create_app(test_config=None):
     app = Flask(__name__, template_folder=str(ROOT / 'frontend'),
                 static_folder=str(ROOT / 'frontend' / 'assets'), static_url_path='/assets')
@@ -74,6 +55,7 @@ def create_app(test_config=None):
 
     @app.before_request
     def load_user_and_check_form():
+        g.user = None
         if request.endpoint == 'static':
             return
         session.setdefault('csrf_token', secrets.token_hex(32))
@@ -81,16 +63,26 @@ def create_app(test_config=None):
             token = request.form.get('csrf_token', '')
             if not secrets.compare_digest(token, session['csrf_token']):
                 abort(400, 'The form expired. Reload the page and try again.')
-        g.user = None
         if session.get('user_id'):
             g.user = query('SELECT id, name, email, role FROM employees WHERE id=%s AND active=1',
                            (session['user_id'],), one=True)
             if g.user is None:
                 session.clear()
+        # Every matched page is protected unless explicitly public. New routes
+        # also require an entry in permissions.py before anyone can use them.
+        if request.endpoint not in (None, 'login', 'logout'):
+            if g.user is None:
+                return redirect(url_for('login'))
+            if not allowed(g.user['role'], request.endpoint, request.method):
+                abort(403, 'Your department does not have access to this action.')
+
+    def can_access(endpoint, method='GET'):
+        return bool(getattr(g, 'user', None) and allowed(g.user['role'], endpoint, method))
 
     @app.context_processor
     def shared_template_values():
-        return {'user': getattr(g, 'user', None), 'currency': os.getenv('CURRENCY', 'UGX')}
+        return {'user': getattr(g, 'user', None), 'currency': os.getenv('CURRENCY', 'UGX'),
+                'can_access': can_access, 'roles': ROLES}
 
     @app.errorhandler(pymysql.IntegrityError)
     def invalid_relationship(error):
@@ -137,20 +129,20 @@ def create_app(test_config=None):
 
     @app.get('/')
     @app.get('/index.html')
-    @login_required
     def dashboard():
         counts = query('SELECT COUNT(*) AS products, COALESCE(SUM(stock),0) AS units, '
                        'COALESCE(SUM(stock <= reorder_level),0) AS low_stock FROM products', one=True)
-        totals = query('SELECT COALESCE(SUM(si.quantity*si.unit_price),0) AS revenue, '
-                       'COUNT(DISTINCT s.id) AS sales FROM sales s JOIN sale_items si ON si.sale_id=s.id', one=True)
         low_stock = query('SELECT * FROM products WHERE stock <= reorder_level ORDER BY stock, name LIMIT 8')
-        recent = query('SELECT s.id, s.customer_name, s.created_at, SUM(si.quantity*si.unit_price) AS total '
-                       'FROM sales s JOIN sale_items si ON si.sale_id=s.id GROUP BY s.id ORDER BY s.id DESC LIMIT 5')
+        totals, recent = None, []
+        if can_access('sales'):
+            totals = query('SELECT COALESCE(SUM(si.quantity*si.unit_price),0) AS revenue, '
+                           'COUNT(DISTINCT s.id) AS sales FROM sales s JOIN sale_items si ON si.sale_id=s.id', one=True)
+            recent = query('SELECT s.id, s.customer_name, s.created_at, SUM(si.quantity*si.unit_price) AS total '
+                           'FROM sales s JOIN sale_items si ON si.sale_id=s.id GROUP BY s.id ORDER BY s.id DESC LIMIT 5')
         return render_template('index.html', title='Dashboard', counts=counts, totals=totals,
                                low_stock=low_stock, recent=recent)
 
     @app.route('/categories.html', methods=['GET', 'POST'])
-    @login_required
     def categories():
         if request.method == 'POST':
             name = required('name')
@@ -168,7 +160,6 @@ def create_app(test_config=None):
         return render_template('categories.html', title='Categories', rows=rows, editing=editing)
 
     @app.post('/categories/<int:record_id>/delete')
-    @login_required
     def delete_category(record_id):
         execute('DELETE FROM categories WHERE id=%s', (record_id,))
         get_db().commit()
@@ -176,7 +167,6 @@ def create_app(test_config=None):
         return redirect(url_for('categories'))
 
     @app.route('/suppliers.html', methods=['GET', 'POST'])
-    @login_required
     def suppliers():
         if request.method == 'POST':
             values = (required('name'), request.form.get('phone', '').strip(), request.form.get('email', '').strip())
@@ -193,7 +183,6 @@ def create_app(test_config=None):
         return render_template('suppliers.html', title='Suppliers', rows=query('SELECT * FROM suppliers ORDER BY name'), editing=editing)
 
     @app.post('/suppliers/<int:record_id>/delete')
-    @login_required
     def delete_supplier(record_id):
         execute('DELETE FROM suppliers WHERE id=%s', (record_id,))
         get_db().commit()
@@ -201,7 +190,6 @@ def create_app(test_config=None):
         return redirect(url_for('suppliers'))
 
     @app.route('/products.html', methods=['GET', 'POST'])
-    @login_required
     def products():
         if request.method == 'POST':
             values = (required('name'), integer('category_id', 1), money('price'), integer('reorder_level'))
@@ -217,12 +205,11 @@ def create_app(test_config=None):
         search = request.args.get('q', '').strip()
         rows = query('SELECT p.*, c.name AS category FROM products p JOIN categories c ON c.id=p.category_id '
                      'WHERE p.name LIKE %s ORDER BY p.name', ('%' + search + '%',))
-        editing = query('SELECT * FROM products WHERE id=%s', (request.args.get('edit'),), one=True) if request.args.get('edit') else None
+        editing = query('SELECT * FROM products WHERE id=%s', (request.args.get('edit'),), one=True) if request.args.get('edit') and can_access('products', 'POST') else None
         return render_template('products.html', title='Products & inventory', rows=rows, editing=editing,
                                categories=query('SELECT * FROM categories ORDER BY name'), search=search)
 
     @app.post('/products/<int:record_id>/delete')
-    @login_required
     def delete_product(record_id):
         execute('DELETE FROM products WHERE id=%s', (record_id,))
         get_db().commit()
@@ -230,7 +217,6 @@ def create_app(test_config=None):
         return redirect(url_for('products'))
 
     @app.route('/sales.html', methods=['GET', 'POST'])
-    @login_required
     def sales():
         if request.method == 'POST':
             # Combine repeated products before checking stock. Lock rows in ID order.
@@ -271,7 +257,6 @@ def create_app(test_config=None):
                                products=query('SELECT * FROM products WHERE stock>0 ORDER BY name'))
 
     @app.get('/sales/<int:sale_id>')
-    @login_required
     def receipt(sale_id):
         sale = query('SELECT s.*, e.name AS employee FROM sales s JOIN employees e ON e.id=s.employee_id '
                      'WHERE s.id=%s', (sale_id,), one=True)
@@ -283,7 +268,6 @@ def create_app(test_config=None):
                                total=sum(item['total'] for item in items))
 
     @app.route('/purchase-orders.html', methods=['GET', 'POST'])
-    @login_required
     def purchases():
         if request.method == 'POST':
             product_id, supplier_id = integer('product_id', 1), integer('supplier_id', 1)
@@ -305,12 +289,11 @@ def create_app(test_config=None):
                                suppliers=query('SELECT * FROM suppliers ORDER BY name'))
 
     @app.route('/employees.html', methods=['GET', 'POST'])
-    @admin_required
     def employees():
         if request.method == 'POST':
             name, email, role = required('name'), required('email', 150), required('role')
-            if '@' not in email or role not in ('Admin', 'Staff'):
-                raise ValueError('Provide a valid email and choose Admin or Staff.')
+            if '@' not in email or role not in ROLES:
+                raise ValueError('Provide a valid email and choose Admin, Sales, or Purchasing.')
             password = request.form.get('password', '')
             record_id = request.form.get('id')
             if password and len(password) < 8:
@@ -335,7 +318,6 @@ def create_app(test_config=None):
                                rows=query('SELECT id,name,email,role,active FROM employees ORDER BY name'))
 
     @app.post('/employees/<int:record_id>/toggle')
-    @admin_required
     def toggle_employee(record_id):
         if record_id == g.user['id']:
             raise ValueError('You cannot deactivate your own account.')
@@ -345,7 +327,6 @@ def create_app(test_config=None):
         return redirect(url_for('employees'))
 
     @app.route('/settings.html', methods=['GET', 'POST'])
-    @login_required
     def settings():
         if request.method == 'POST':
             row = query('SELECT password_hash FROM employees WHERE id=%s', (g.user['id'],), one=True)

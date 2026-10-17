@@ -75,4 +75,20 @@ def initialize(settings):
             for statement in Path(__file__).with_name('schema.sql').read_text().split(';'):
                 if statement.strip():
                     cursor.execute(statement)
+            upgrade_roles(cursor)
         connection.commit()
+
+
+def upgrade_roles(cursor):
+    """Upgrade existing two-role databases without deleting employees or records."""
+    cursor.execute("SHOW COLUMNS FROM employees LIKE 'role'")
+    column = cursor.fetchone()
+    if column['Type'] == "enum('Admin','Sales','Purchasing')":
+        return
+    # Widen first so the old Staff value and new department roles can coexist.
+    # Rerunning init-db safely resumes an interrupted upgrade.
+    cursor.execute("ALTER TABLE employees MODIFY role "
+                   "ENUM('Admin','Staff','Sales','Purchasing') NOT NULL DEFAULT 'Sales'")
+    cursor.execute("UPDATE employees SET role='Sales' WHERE role='Staff'")
+    cursor.execute("ALTER TABLE employees MODIFY role "
+                   "ENUM('Admin','Sales','Purchasing') NOT NULL DEFAULT 'Sales'")

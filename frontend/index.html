@@ -5,7 +5,11 @@
       <h2>Welcome, {{ user.name }}.</h2>
       <p>Here is an overview of your store.</p>
     </div>
-    <a class="button" href="{{ url_for('sales') }}">+ Record a sale</a>
+    {% if can_access("sales") %}
+      <a class="button" href="{{ url_for('sales') }}">+ Record a sale</a>
+    {% elif can_access("purchases") %}
+      <a class="button" href="{{ url_for('purchases') }}">+ Receive stock</a>
+    {% endif %}
   </section>
   <div class="stats">
     <article class="stat">
@@ -13,16 +17,18 @@
       <strong>{{ counts.products }}</strong>
       <small>{{ counts.units }} units in stock</small>
     </article>
-    <article class="stat">
-      <span>Total sales revenue</span>
-      <strong>{{ totals.revenue | money }}</strong>
-      <small>{{ currency }} · all time</small>
-    </article>
-    <article class="stat">
-      <span>Completed sales</span>
-      <strong>{{ totals.sales }}</strong>
-      <small>All time</small>
-    </article>
+    {% if can_access("sales") %}
+      <article class="stat">
+        <span>Total sales revenue</span>
+        <strong>{{ totals.revenue | money }}</strong>
+        <small>{{ currency }} · all time</small>
+      </article>
+      <article class="stat">
+        <span>Completed sales</span>
+        <strong>{{ totals.sales }}</strong>
+        <small>All time</small>
+      </article>
+    {% endif %}
     <article class="stat">
       <span>Low-stock products</span>
       <strong>{{ counts.low_stock }}</strong>
@@ -33,7 +39,7 @@
     <section class="panel">
       <div class="section-heading">
         <h2>Low-stock alerts</h2>
-        <a href="{{ url_for('purchases') }}">Receive stock →</a>
+        {% if can_access("purchases") %}<a href="{{ url_for('purchases') }}">Receive stock →</a>{% endif %}
       </div>
       <div class="table-wrap">
         <table>
@@ -62,37 +68,47 @@
         </table>
       </div>
     </section>
-    <section class="panel">
-      <div class="section-heading">
-        <h2>Recent sales</h2>
-        <a href="{{ url_for('sales') }}">View all →</a>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Sale</th>
-              <th>Customer</th>
-              <th>Total ({{ currency }})</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for s in recent %}
+    {% if can_access("sales") %}
+      <section class="panel">
+        <div class="section-heading">
+          <h2>Recent sales</h2>
+          <a href="{{ url_for('sales') }}">View all →</a>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
               <tr>
-                <td>
-                  <a href="{{ url_for('receipt', sale_id=s.id) }}">#{{ s.id }}</a>
-                </td>
-                <td>{{ s.customer_name }}</td>
-                <td>{{ s.total | money }}</td>
+                <th>Sale</th>
+                <th>Customer</th>
+                <th>Total ({{ currency }})</th>
               </tr>
-            {% else %}
-              <tr>
-                <td colspan="3" class="empty">No sales yet. Record your first sale to get started.</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </section>
+            </thead>
+            <tbody>
+              {% for s in recent %}
+                <tr>
+                  <td>
+                    <a href="{{ url_for('receipt', sale_id=s.id) }}">#{{ s.id }}</a>
+                  </td>
+                  <td>{{ s.customer_name }}</td>
+                  <td>{{ s.total | money }}</td>
+                </tr>
+              {% else %}
+                <tr>
+                  <td colspan="3" class="empty">No sales yet. Record your first sale to get started.</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    {% else %}
+      <section class="panel">
+        <h2>Purchasing workspace</h2>
+        <p class="muted">Keep your store stocked. Update the catalogue, manage suppliers, and record deliveries.</p>
+        <p><a href="{{ url_for('purchases') }}">Receive a purchase</a></p>
+        <p><a href="{{ url_for('suppliers') }}">Manage suppliers</a></p>
+        <p><a href="{{ url_for('categories') }}">Manage categories</a></p>
+      </section>
+    {% endif %}
   </div>
 {% endblock %}

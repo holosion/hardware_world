@@ -35,7 +35,7 @@ class StoreTests(unittest.TestCase):
             self.admin = execute('INSERT INTO employees (name,email,password_hash,role) VALUES (%s,%s,%s,%s)',
                                  ('Test Admin', 'admin@example.test', generate_password_hash('test-password'), 'Admin'))
             self.staff = execute('INSERT INTO employees (name,email,password_hash,role) VALUES (%s,%s,%s,%s)',
-                                 ('Test Staff', 'staff@example.test', generate_password_hash('test-password'), 'Staff'))
+                                 ('Test Staff', 'staff@example.test', generate_password_hash('test-password'), 'Sales'))
             self.category = execute('INSERT INTO categories (name) VALUES (%s)', ('Tools',))
             self.supplier = execute('INSERT INTO suppliers (name) VALUES (%s)', ('Test Supplier',))
             self.product = execute('INSERT INTO products (name,category_id,price,stock) VALUES (%s,%s,%s,%s)',
@@ -69,6 +69,7 @@ class StoreTests(unittest.TestCase):
                 self.assertNotIn(b'<script', response.data)
         with self.client.get('/assets/css/style.css') as response:
             self.assertEqual(response.status_code, 200)
+        self.assertIn(b'<option selected>Sales</option>', self.client.get('/employees.html').data)
         with self.app.app_context():
             self.assertEqual(len(query('SHOW TABLES')), 7)
 
@@ -178,7 +179,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.post('/suppliers.html', {'name': 'New Supplier', 'phone': '0700000000',
                                                      'email': 'supplier@example.test'}).status_code, 302)
         self.assertEqual(self.post('/employees.html', {'name': 'New Staff', 'email': 'new@example.test',
-                             'role': 'Staff', 'password': 'new-password'}).status_code, 302)
+                             'role': 'Sales', 'password': 'new-password'}).status_code, 302)
         employee = self.read('SELECT * FROM employees WHERE email=%s', ('new@example.test',))
         self.assertNotEqual(employee['password_hash'], 'new-password')
 
@@ -188,6 +189,98 @@ class StoreTests(unittest.TestCase):
         self.assertNotIn(b'<script>', response.data)
         self.assertEqual(self.client.get("/products.html?q=' OR 1=1 --").status_code, 200)
         self.assertEqual(self.read('SELECT COUNT(*) AS n FROM employees')['n'], 2)
+
+    def test_sales_cannot_manage_stock_purchases_or_accounts(self):
+        self.login('staff@example.test')
+        page = self.client.get('/products.html?edit=' + str(self.product))
+        self.assertEqual(page.status_code, 200)
+        self.assertNotIn(b'Save product', page.data)
+        self.assertNotIn(b'>Edit</a>', page.data)
+        self.assertNotIn(b'Delete</button>', page.data)
+        self.assertNotIn(b'href="/suppliers.html"', page.data)
+        self.assertNotIn(b'href="/purchase-orders.html"', page.data)
+        for path in ('/categories.html', '/suppliers.html', '/purchase-orders.html', '/employees.html'):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).status_code, 403)
+                self.assertEqual(self.post(path, {'role': 'Admin'}).status_code, 403)
+        for path in ('/products.html', f'/products/{self.product}/delete',
+                     f'/categories/{self.category}/delete', f'/suppliers/{self.supplier}/delete',
+                     f'/employees/{self.admin}/toggle'):
+            self.assertEqual(self.post(path, {'name': 'Changed', 'price': '0'}).status_code, 403)
+        self.assertEqual(self.read('SELECT stock FROM products WHERE id=%s', (self.product,))['stock'], 10)
+        self.assertEqual(self.read('SELECT name FROM products WHERE id=%s', (self.product,))['name'], 'Hammer')
+        self.assertEqual(self.read('SELECT role FROM employees WHERE id=%s', (self.staff,))['role'], 'Sales')
+        self.assertEqual(self.client.get('/').status_code, 200)
+        self.assertEqual(self.client.get('/settings.html').status_code, 200)
+
+    def test_purchasing_can_receive_stock_but_cannot_access_sales(self):
+        self.post('/sales.html', {'product_id': str(self.product), 'quantity': '1'})
+        sale_id = self.read('SELECT id FROM sales')['id']
+        self.assertEqual(self.post('/employees.html', {'name': 'Buyer', 'email': 'buyer@example.test',
+                             'role': 'Purchasing', 'password': 'buyer-password'}).status_code, 302)
+        self.assertEqual(self.login('buyer@example.test', 'buyer-password').status_code, 302)
+        dashboard = self.client.get('/')
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertIn(b'Purchasing workspace', dashboard.data)
+        self.assertNotIn(b'Recent sales', dashboard.data)
+        self.assertNotIn(b'Total sales revenue', dashboard.data)
+        self.assertNotIn(b'href="/sales.html"', dashboard.data)
+        for path in ('/products.html', '/categories.html', '/suppliers.html', '/purchase-orders.html', '/settings.html'):
+            self.assertEqual(self.client.get(path).status_code, 200)
+        self.assertEqual(self.client.get('/sales.html').status_code, 403)
+        self.assertEqual(self.client.get(f'/sales/{sale_id}').status_code, 403)
+        self.assertEqual(self.post('/sales.html', {'product_id': self.product, 'quantity': '1'}).status_code, 403)
+        self.assertEqual(self.client.get('/employees.html').status_code, 403)
+        self.assertEqual(self.post('/employees.html', {'role': 'Admin'}).status_code, 403)
+        self.assertEqual(self.post('/categories.html', {'name': 'New category'}).status_code, 302)
+        self.assertEqual(self.post('/suppliers.html', {'name': 'Another supplier'}).status_code, 302)
+        self.assertEqual(self.post('/products.html', {'id': self.product, 'name': 'Hammer',
+                         'category_id': self.category, 'price': '22.00', 'reorder_level': 3}).status_code, 302)
+        self.assertEqual(self.post('/purchase-orders.html', {'supplier_id': self.supplier,
+                         'product_id': self.product, 'quantity': 5, 'unit_cost': '12.00'}).status_code, 302)
+        self.assertEqual(self.read('SELECT stock FROM products WHERE id=%s', (self.product,))['stock'], 14)
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM sales')['n'], 1)
+
+    def test_admin_role_change_takes_effect_in_existing_session(self):
+        department_client = self.app.test_client()
+        with department_client.session_transaction() as session:
+            session['user_id'] = self.staff
+        self.assertEqual(department_client.get('/sales.html').status_code, 200)
+        self.assertEqual(self.post('/employees.html', {'id': self.staff, 'name': 'Buyer',
+                         'email': 'staff@example.test', 'role': 'Purchasing'}).status_code, 302)
+        self.assertEqual(department_client.get('/sales.html').status_code, 403)
+        self.assertEqual(department_client.get('/purchase-orders.html').status_code, 200)
+        self.assertEqual(self.post('/employees.html', {'id': self.admin, 'name': 'Admin',
+                         'email': 'admin@example.test', 'role': 'Sales'}).status_code, 400)
+        self.assertEqual(self.post('/employees.html', {'name': 'Invalid', 'email': 'invalid@example.test',
+                         'role': 'Owner', 'password': 'test-password'}).status_code, 400)
+
+    def test_legacy_staff_upgrade_preserves_accounts_and_business_records(self):
+        with self.app.app_context():
+            execute("ALTER TABLE employees MODIFY role ENUM('Admin','Staff','Sales','Purchasing') NOT NULL DEFAULT 'Staff'")
+            execute("UPDATE employees SET role='Staff' WHERE id=%s", (self.staff,))
+            get_db().commit()
+        for _ in range(2):
+            result = self.app.test_cli_runner().invoke(args=['init-db'])
+            self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.read('SELECT role FROM employees WHERE id=%s', (self.staff,))['role'], 'Sales')
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM employees')['n'], 2)
+        self.assertEqual(self.read('SELECT stock FROM products WHERE id=%s', (self.product,))['stock'], 10)
+
+    def test_unknown_roles_and_unlisted_endpoints_are_denied(self):
+        from permissions import allowed
+        self.assertFalse(allowed('Staff', 'sales'))
+        self.assertFalse(allowed('Owner', 'employees', 'POST'))
+        app = create_app({'TESTING': True, 'SECRET_KEY': 'test', 'MYSQL': self.mysql})
+
+        @app.get('/unlisted')
+        def unlisted():
+            return 'This must not be accessible.'
+
+        with app.test_client() as client:
+            with client.session_transaction() as session:
+                session['user_id'] = self.admin
+            self.assertEqual(client.get('/unlisted').status_code, 403)
 
 
 if __name__ == '__main__':
