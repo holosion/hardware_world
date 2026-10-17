@@ -95,6 +95,8 @@ Sales and stock changes commit together or roll back together. Row locks prevent
 | backend/db.py | MySQL connection and SQL helpers |
 | backend/permissions.py | Role access table shared by routes and templates |
 | backend/backup.py | Consistent CSV export, validation, and transactional restore |
+| DATABASE_DIAGRAM.md | Visual ER diagram of tables, columns, and foreign keys |
+| backend/generate_diagram.py | Regenerate the diagram from live MySQL schema metadata |
 | backend/schema.sql | Seven tables and foreign keys |
 | backend/requirements.txt | Three direct dependencies |
 | backend/test_app.py | Integration tests using temporary MySQL schema |

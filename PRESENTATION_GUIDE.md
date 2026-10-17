@@ -25,6 +25,8 @@ Read `products()` in `backend/main.py`, then `frontend/products.html` and `backe
 
 ## Table relationships
 
+Open [DATABASE_DIAGRAM.md](DATABASE_DIAGRAM.md) in VS Code for the full diagram with columns, primary keys, foreign keys, and unique fields. Press **Ctrl+Shift+V** if the source appears. The diagram is generated from the current MySQL schema.
+
 ```mermaid
 erDiagram
     categories ||--o{ products : groups

@@ -23,6 +23,20 @@ The local configuration is in `.vscode/settings.json` and `.vscode/tasks.json`. 
 
 If the new profile is not visible yet, run **Developer: Reload Window** from Ctrl+Shift+P. Do not run `schema.sql` just to view data; it defines tables. `explore.sql` contains read-only queries for the existing database, including employee usernames, product stock, suppliers, purchases, and sales totals.
 
+## Visualize the table relationships
+
+Open [DATABASE_DIAGRAM.md](DATABASE_DIAGRAM.md). This computer is configured to open it in **Markdown Preview**, displaying the seven tables as boxes joined by their foreign-key relationships. If the source appears, press **Ctrl+Shift+V**, or use **Reopen Editor With -> Markdown Preview**. VS Code's built-in Mermaid support renders it locally.
+
+Use the on-diagram zoom controls, or hold **Alt** and scroll to zoom; Alt-drag pans. PK means primary key, FK means foreign key, and UK means unique field.
+
+The diagram is generated from live MySQL metadata, and is a snapshot of the table structure. To refresh it after changing the schema, choose **Terminal -> Run Task -> Database: Refresh ER diagram**, or run:
+
+```powershell
+backend/.venv/Scripts/python.exe backend/generate_diagram.py
+```
+
+The generator reads schema metadata without changing records. SQLTools continues to show live rows. See [VS Code's Markdown documentation](https://code.visualstudio.com/docs/languages/markdown#_mermaid-diagram-rendering) for preview and pan/zoom controls.
+
 ## Use the MySQL terminal inside VS Code
 
 1. Select **Terminal -> Run Task**.
