@@ -15,6 +15,8 @@ Payroll, ledger, departments, branches, warehouses, approvals, credit accounts, 
 
 ## Run on Windows
 
+To browse this database and run SQL inside VS Code, see [MYSQL_IN_VSCODE.md](MYSQL_IN_VSCODE.md). Read-only demonstration queries are in `backend/explore.sql`.
+
 Use Python 3.11+ and your existing MySQL server (MySQL 8 recommended). MySQL Workbench is the tool for viewing the database; MySQL is the server that stores the data.
 
 From the project folder:
