@@ -1,14 +1,43 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sign In — Hardware World ERP</title>
-  <link rel="stylesheet" href="./assets/css/style.css">
-  <script src="https://unpkg.com/lucide@latest"></script>
-</head>
-<body class="login-page" data-page="login">
-  <div id="app"></div>
-  <script type="module" src="./assets/js/main.js"></script>
-</body>
-</html>
+{% extends "base.html" %}
+{% block content %}
+  <div class="login-layout">
+    <section class="login-intro">
+      <span class="brand-mark">HW</span>
+      <p class="eyebrow">HARDWARE WORLD</p>
+      <h1>
+        Your store.
+        <br>
+        All in one place.
+      </h1>
+      <p>Keep track of your products, receive stock, and record everyday sales.</p>
+      <div class="login-features">
+        <span>01 &nbsp; Manage your inventory</span>
+        <span>02 &nbsp; Record purchases and sales</span>
+        <span>03 &nbsp; See how your store is doing</span>
+      </div>
+    </section>
+    <section class="login-card">
+      <p class="eyebrow">WELCOME BACK</p>
+      <h2>Sign in to your store</h2>
+      <p class="muted">Enter your employee account details.</p>
+      <form method="post">
+        {{ csrf() }}
+        <label>
+          Email address<input type="email"
+       name="email"
+       autocomplete="username"
+       required
+       maxlength="150">
+        </label>
+        <label>
+          Password<input type="password"
+       name="password"
+       autocomplete="current-password"
+       required>
+        </label>
+        <button class="button">Sign in</button>
+      </form>
+      <p class="muted small-text">Need an account? Ask your administrator.</p>
+    </section>
+  </div>
+{% endblock %}

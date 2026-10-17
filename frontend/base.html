@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title }} | Hardware World</title>
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/style.css') }}">
+  </head>
+  <body>
+    {% macro csrf() %}
+      <input type="hidden" name="csrf_token" value="{{ session.csrf_token }}">
+    {% endmacro %}
+    {% if user %}
+      <div class="app-shell">
+        <aside class="sidebar">
+          <a class="brand" href="{{ url_for('dashboard') }}">
+            <span class="brand-mark">HW</span>
+            <span>Hardware World<small>Store management</small>
+            </span>
+          </a>
+          <p class="nav-label">OVERVIEW</p>
+          <nav aria-label="Main navigation">
+            {% for endpoint, symbol, label in [('dashboard','▦','Dashboard'),('products','▣','Products & inventory'),('categories','▤','Categories'),('suppliers','◇','Suppliers'),('purchases','↓','Purchases'),('sales','↑','Sales')] %}
+              <a href="{{ url_for(endpoint) }}"
+                 class="nav-link {{ 'active' if request.endpoint == endpoint else '' }}"
+                 {% if request.endpoint == endpoint %} aria-current="page" {% endif %}>
+                <span aria-hidden="true">{{ symbol }}</span>{{ label }}</a>
+            {% endfor %}
+            {% if user.role == "Admin" %}
+              <p class="nav-label">MANAGEMENT</p>
+              <a class="nav-link {{ 'active' if request.endpoint == 'employees' else '' }}"
+                 href="{{ url_for('employees') }}">
+                <span aria-hidden="true">○</span>Employees</a>
+            {% endif %}
+            <a class="nav-link {{ 'active' if request.endpoint == 'settings' else '' }}"
+               href="{{ url_for('settings') }}">
+              <span aria-hidden="true">○</span>My account</a>
+          </nav>
+          <div class="sidebar-bottom">
+            <strong>Hardware World</strong>
+            <small>Inventory, purchases & sales</small>
+          </div>
+        </aside>
+        <div class="workspace">
+          <header class="topbar">
+            <span class="breadcrumb">Hardware World / <strong>{{ title }}</strong>
+            </span>
+            <div class="user">
+              <span class="avatar">{{ user.name[0] | upper }}</span>
+              <span>{{ user.name }}<small>{{ user.role }}</small>
+              </span>
+              <form method="post" action="{{ url_for('logout') }}">
+                {{ csrf() }}
+                <button class="button secondary small">Sign out</button>
+              </form>
+            </div>
+          </header>
+          <main id="main-content">
+            <div class="page-heading">
+              <div>
+                <p class="eyebrow">STORE WORKSPACE</p>
+                <h1>{{ title }}</h1>
+              </div>
+              <span class="pill">{{ currency }}</span>
+            </div>
+    {% else %}
+      <main class="public-main">
+    {% endif %}
+    {% for category, message in get_flashed_messages(with_categories=true) %}
+      <div role="status" class="alert {{ category }}">{{ message }}</div>
+    {% endfor %}
+    {% block content %}{% endblock %}
+  </main>
+  {% if user %}
+    <footer>
+      Hardware World · Store management
+    </footer>
+    </div>
+    </div>
+  {% endif %}
+</body>
+</html>

@@ -1,14 +1,49 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Settings — Hardware World ERP</title>
-  <link rel="stylesheet" href="./assets/css/style.css">
-  <script src="https://unpkg.com/lucide@latest"></script>
-</head>
-<body data-page="settings">
-  <div id="app"></div>
-  <script type="module" src="./assets/js/main.js"></script>
-</body>
-</html>
+{% extends "base.html" %}
+{% block content %}
+  <div class="two-columns">
+    <section class="panel">
+      <h2>Account details</h2>
+      <dl>
+        <dt>Name</dt>
+        <dd>
+          {{ user.name }}
+        </dd>
+        <dt>Email</dt>
+        <dd>
+          {{ user.email }}
+        </dd>
+        <dt>Role</dt>
+        <dd>
+          {{ user.role }}
+        </dd>
+      </dl>
+    </section>
+    <section class="panel">
+      <h2>Change password</h2>
+      <form method="post">
+        {{ csrf() }}
+        <label>
+          Current password<input name="current_password"
+       type="password"
+       autocomplete="current-password"
+       required>
+        </label>
+        <label>
+          New password<input name="password"
+       type="password"
+       minlength="8"
+       autocomplete="new-password"
+       required>
+        </label>
+        <label>
+          Confirm new password<input name="confirm_password"
+       type="password"
+       minlength="8"
+       autocomplete="new-password"
+       required>
+        </label>
+        <button class="button">Change password</button>
+      </form>
+    </section>
+  </div>
+{% endblock %}

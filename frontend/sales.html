@@ -1,14 +1,76 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sales &amp; POS — Hardware World ERP</title>
-  <link rel="stylesheet" href="./assets/css/style.css">
-  <script src="https://unpkg.com/lucide@latest"></script>
-</head>
-<body data-page="sales">
-  <div id="app"></div>
-  <script type="module" src="./assets/js/main.js"></script>
-</body>
-</html>
+{% extends "base.html" %}
+{% block content %}
+  <section class="panel">
+    <h2>Record a sale</h2>
+    <p class="muted">Choose up to three products. Prices come from the catalogue; totals are calculated when you save.</p>
+    <form method="post">
+      {{ csrf() }}
+      <label class="customer-field">
+        Customer name (optional)<input name="customer_name" maxlength="100" placeholder="Walk-in customer">
+      </label>
+      <div class="sale-lines">
+        {% for index in range(3) %}
+          <div class="sale-line">
+            <label>
+              Product {{ index + 1 }}{{ ' (optional)' if index else '' }}<select name="product_id"
+        {{ 'required' if index == 0 else '' }}>
+              <option value="">Choose product</option>
+              {% for p in products %}
+                <option value="{{ p.id }}">{{ p.name }} · {{ currency }} {{ p.price | money }} · {{ p.stock }} in stock</option>
+              {% endfor %}
+              </select>
+            </label>
+            <label>
+              Quantity<input type="number"
+       name="quantity"
+       min="1"
+       max="1000000"
+       step="1"
+       value="1"
+       required>
+            </label>
+          </div>
+        {% endfor %}
+      </div>
+      <button class="button" {{ 'disabled' if not products else '' }}>Save sale & view receipt</button>
+      {% if not products %}
+        <p class="muted">No stock available. Add products or receive a purchase first.</p>
+      {% endif %}
+    </form>
+  </section>
+  <section class="panel">
+    <h2>Sales history</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Sale</th>
+            <th>Date</th>
+            <th>Customer</th>
+            <th>Employee</th>
+            <th>Total ({{ currency }})</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+            <tr>
+              <td>#{{ row.id }}</td>
+              <td>{{ row.created_at }}</td>
+              <td>{{ row.customer_name }}</td>
+              <td>{{ row.employee }}</td>
+              <td>{{ row.total | money }}</td>
+              <td>
+                <a href="{{ url_for('receipt', sale_id=row.id) }}">Receipt →</a>
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="6" class="empty">No sales yet.</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

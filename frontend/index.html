@@ -1,14 +1,98 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Dashboard — Hardware World ERP</title>
-  <link rel="stylesheet" href="./assets/css/style.css">
-  <script src="https://unpkg.com/lucide@latest"></script>
-</head>
-<body data-page="index">
-  <div id="app"><!-- Shell and dashboard injected by main.js --></div>
-  <script type="module" src="./assets/js/main.js"></script>
-</body>
-</html>
+{% extends "base.html" %}
+{% block content %}
+  <section class="welcome">
+    <div>
+      <h2>Welcome, {{ user.name }}.</h2>
+      <p>Here is an overview of your store.</p>
+    </div>
+    <a class="button" href="{{ url_for('sales') }}">+ Record a sale</a>
+  </section>
+  <div class="stats">
+    <article class="stat">
+      <span>Products</span>
+      <strong>{{ counts.products }}</strong>
+      <small>{{ counts.units }} units in stock</small>
+    </article>
+    <article class="stat">
+      <span>Total sales revenue</span>
+      <strong>{{ totals.revenue | money }}</strong>
+      <small>{{ currency }} · all time</small>
+    </article>
+    <article class="stat">
+      <span>Completed sales</span>
+      <strong>{{ totals.sales }}</strong>
+      <small>All time</small>
+    </article>
+    <article class="stat">
+      <span>Low-stock products</span>
+      <strong>{{ counts.low_stock }}</strong>
+      <small>At or below reorder level</small>
+    </article>
+  </div>
+  <div class="two-columns">
+    <section class="panel">
+      <div class="section-heading">
+        <h2>Low-stock alerts</h2>
+        <a href="{{ url_for('purchases') }}">Receive stock →</a>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Product</th>
+              <th>In stock</th>
+              <th>Reorder level</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for p in low_stock %}
+              <tr>
+                <td>{{ p.name }}</td>
+                <td>
+                  <span class="badge warning">{{ p.stock }}</span>
+                </td>
+                <td>{{ p.reorder_level }}</td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="3" class="empty">All stocked products are above their reorder level.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="section-heading">
+        <h2>Recent sales</h2>
+        <a href="{{ url_for('sales') }}">View all →</a>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Sale</th>
+              <th>Customer</th>
+              <th>Total ({{ currency }})</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for s in recent %}
+              <tr>
+                <td>
+                  <a href="{{ url_for('receipt', sale_id=s.id) }}">#{{ s.id }}</a>
+                </td>
+                <td>{{ s.customer_name }}</td>
+                <td>{{ s.total | money }}</td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="3" class="empty">No sales yet. Record your first sale to get started.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+{% endblock %}

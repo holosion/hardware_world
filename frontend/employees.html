@@ -1,14 +1,86 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Employees — Hardware World ERP</title>
-  <link rel="stylesheet" href="./assets/css/style.css">
-  <script src="https://unpkg.com/lucide@latest"></script>
-</head>
-<body data-page="employees">
-  <div id="app"></div>
-  <script type="module" src="./assets/js/main.js"></script>
-</body>
-</html>
+{% extends "base.html" %}
+{% block content %}
+  <div class="content-grid">
+    <section class="panel">
+      <h2>{{ 'Edit employee' if editing else 'Add employee' }}</h2>
+      <form method="post">
+        {{ csrf() }}
+        {% if editing %}
+          <input type="hidden" name="id" value="{{ editing.id }}">
+        {% endif %}
+        <label>
+          Full name<input name="name"
+       maxlength="100"
+       required
+       value="{{ editing.name if editing else '' }}">
+        </label>
+        <label>
+          Email<input type="email"
+       name="email"
+       maxlength="150"
+       required
+       value="{{ editing.email if editing else '' }}">
+        </label>
+        <label>
+          Role<select name="role">
+          {% for role in ['Staff', 'Admin'] %}
+            <option {{ 'selected' if editing and editing.role == role else '' }}>{{ role }}</option>
+          {% endfor %}
+          </select>
+        </label>
+        <label>
+          {{ 'New password (leave blank to keep current)' if editing else 'Password' }}<input type="password"
+       name="password"
+       autocomplete="new-password"
+       minlength="8"
+       {{ 'required' if not editing else '' }}>
+        </label>
+        <div class="form-actions">
+          <button class="button">Save employee</button>
+          {% if editing %}
+            <a href="{{ url_for('employees') }}">Cancel</a>
+          {% endif %}
+        </div>
+      </form>
+      <p class="muted small-text">Staff manage stock, suppliers, purchases, and sales. Admins also manage employee accounts.</p>
+    </section>
+    <section class="panel">
+      <h2>Employee accounts</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Email</th>
+              <th>Role</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+              <tr>
+                <td>{{ row.name }}</td>
+                <td>{{ row.email }}</td>
+                <td>{{ row.role }}</td>
+                <td>
+                  <span class="badge {{ 'good' if row.active else '' }}">{{ 'Active' if row.active else 'Inactive' }}</span>
+                </td>
+                <td class="actions">
+                  <a href="{{ url_for('employees', edit=row.id) }}">Edit</a>
+                  {% if row.id != user.id %}
+                    <form method="post"
+                          action="{{ url_for('toggle_employee', record_id=row.id) }}">
+                      {{ csrf() }}
+                      <button class="text-button">{{ 'Deactivate' if row.active else 'Activate' }}</button>
+                    </form>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+{% endblock %}

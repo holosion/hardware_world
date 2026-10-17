@@ -1,14 +1,63 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Categories — Hardware World ERP</title>
-  <link rel="stylesheet" href="./assets/css/style.css">
-  <script src="https://unpkg.com/lucide@latest"></script>
-</head>
-<body data-page="categories">
-  <div id="app"></div>
-  <script type="module" src="./assets/js/main.js"></script>
-</body>
-</html>
+{% extends "base.html" %}
+{% block content %}
+  <div class="content-grid">
+    <section class="panel">
+      <h2>{{ 'Edit category' if editing else 'Add category' }}</h2>
+      <p class="muted">Group similar hardware products together.</p>
+      <form method="post">
+        {{ csrf() }}
+        {% if editing %}
+          <input type="hidden" name="id" value="{{ editing.id }}">
+        {% endif %}
+        <label>
+          Category name<input name="name"
+       required
+       maxlength="100"
+       value="{{ editing.name if editing else '' }}">
+        </label>
+        <div class="form-actions">
+          <button class="button">Save category</button>
+          {% if editing %}
+            <a href="{{ url_for('categories') }}">Cancel</a>
+          {% endif %}
+        </div>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Product categories</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Products</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+              <tr>
+                <td>{{ row.name }}</td>
+                <td>{{ row.product_count }}</td>
+                <td class="actions">
+                  <a href="{{ url_for('categories', edit=row.id) }}">Edit</a>
+                  {% if not row.product_count %}
+                    <form method="post"
+                          action="{{ url_for('delete_category', record_id=row.id) }}">
+                      {{ csrf() }}
+                      <button class="text-button danger">Delete</button>
+                    </form>
+                  {% endif %}
+                </td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="3" class="empty">No categories yet. Add a category before adding products.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+{% endblock %}

@@ -1,14 +1,76 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Suppliers — Hardware World ERP</title>
-  <link rel="stylesheet" href="./assets/css/style.css">
-  <script src="https://unpkg.com/lucide@latest"></script>
-</head>
-<body data-page="suppliers">
-  <div id="app"></div>
-  <script type="module" src="./assets/js/main.js"></script>
-</body>
-</html>
+{% extends "base.html" %}
+{% block content %}
+  <div class="content-grid">
+    <section class="panel">
+      <h2>{{ 'Edit supplier' if editing else 'Add supplier' }}</h2>
+      <p class="muted">Keep your supplier contact details together.</p>
+      <form method="post">
+        {{ csrf() }}
+        {% if editing %}
+          <input type="hidden" name="id" value="{{ editing.id }}">
+        {% endif %}
+        <label>
+          Supplier name<input name="name"
+       required
+       maxlength="100"
+       value="{{ editing.name if editing else '' }}">
+        </label>
+        <label>
+          Phone<input type="tel"
+       name="phone"
+       maxlength="30"
+       value="{{ editing.phone if editing else '' }}">
+        </label>
+        <label>
+          Email<input type="email"
+       name="email"
+       maxlength="150"
+       value="{{ editing.email if editing else '' }}">
+        </label>
+        <div class="form-actions">
+          <button class="button">Save supplier</button>
+          {% if editing %}
+            <a href="{{ url_for('suppliers') }}">Cancel</a>
+          {% endif %}
+        </div>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Supplier directory</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Phone</th>
+              <th>Email</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+              <tr>
+                <td>{{ row.name }}</td>
+                <td>{{ row.phone or '-' }}</td>
+                <td>{{ row.email or '-' }}</td>
+                <td class="actions">
+                  <a href="{{ url_for('suppliers', edit=row.id) }}">Edit</a>
+                  <form method="post"
+                        action="{{ url_for('delete_supplier', record_id=row.id) }}">
+                    {{ csrf() }}
+                    <button class="text-button danger">Delete</button>
+                  </form>
+                </td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="4" class="empty">No suppliers yet. Add one to record a purchase.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="muted small-text">Suppliers linked to purchases cannot be deleted.</p>
+    </section>
+  </div>
+{% endblock %}

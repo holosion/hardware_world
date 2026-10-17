@@ -1,14 +1,81 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Purchase Orders — Hardware World ERP</title>
-  <link rel="stylesheet" href="./assets/css/style.css">
-  <script src="https://unpkg.com/lucide@latest"></script>
-</head>
-<body data-page="purchase-orders">
-  <div id="app"></div>
-  <script type="module" src="./assets/js/main.js"></script>
-</body>
-</html>
+{% extends "base.html" %}
+{% block content %}
+  <section class="panel">
+    <h2>Receive a purchase</h2>
+    <p class="muted">Record stock that has arrived from a supplier. Each entry is for one product.</p>
+    <form method="post">
+      {{ csrf() }}
+      <div class="form-grid">
+        <label>
+          Supplier<select name="supplier_id" required>
+          <option value="">Choose supplier</option>
+          {% for s in suppliers %}
+            <option value="{{ s.id }}">{{ s.name }}</option>
+          {% endfor %}
+          </select>
+        </label>
+        <label>
+          Product<select name="product_id" required>
+          <option value="">Choose product</option>
+          {% for p in products %}
+            <option value="{{ p.id }}">{{ p.name }}</option>
+          {% endfor %}
+          </select>
+        </label>
+        <label>
+          Quantity received<input type="number" name="quantity" min="1" max="1000000" step="1" required>
+        </label>
+        <label>
+          Cost per unit ({{ currency }})<input type="number"
+       name="unit_cost"
+       min="0"
+       max="9999999999.99"
+       step="0.01"
+       required>
+        </label>
+      </div>
+      <button class="button"
+              {{ 'disabled' if not products or not suppliers else '' }}>Receive stock</button>
+      {% if not products or not suppliers %}
+        <p class="muted">Add a product and a supplier before receiving stock.</p>
+      {% endif %}
+    </form>
+  </section>
+  <section class="panel">
+    <h2>Purchase history</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ID / date</th>
+            <th>Supplier</th>
+            <th>Product</th>
+            <th>Qty</th>
+            <th>Unit cost</th>
+            <th>Total ({{ currency }})</th>
+            <th>Received by</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+            <tr>
+              <td>
+                #{{ row.id }}<small>{{ row.created_at }}</small>
+              </td>
+              <td>{{ row.supplier }}</td>
+              <td>{{ row.product }}</td>
+              <td>{{ row.quantity }}</td>
+              <td>{{ row.unit_cost | money }}</td>
+              <td>{{ row.total | money }}</td>
+              <td>{{ row.employee }}</td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="7" class="empty">No purchases recorded yet.</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

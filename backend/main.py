@@ -1,1103 +1,390 @@
+"""Hardware World: HTML forms -> Flask routes -> parameterized MySQL queries."""
 import os
 import secrets
-import uuid
-from typing import Optional
-from datetime import timedelta, datetime
-from fastapi import BackgroundTasks, FastAPI, Depends, HTTPException, status, Request, Query, Header, Response
-from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordRequestForm
-from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.staticfiles import StaticFiles
-from sqlalchemy.orm import Session
-from sqlalchemy import func, or_
-from jose import JWTError, jwt
-from starlette.background import BackgroundTasks as StarletteBackgroundTasks
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from functools import wraps
 
-import models
-import schemas
-import auth
-import erp_service
-from database import engine, get_db
-from audit import request_ip, write_audit_log
-from api_router import api_router, employee_profile_photo_url
-from bootstrap_admin import ensure_configured_admin
+import click
+import pymysql
+from flask import Flask, abort, flash, g, redirect, render_template, request, session, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
 
-app = FastAPI(
-    title="Hardware World API",
-    description="API for Hardware World inventory, sales, procurement, payroll, and accounting operations.",
-    version="1.0.0",
-    docs_url=None,
-    redoc_url="/redoc",
-    openapi_url="/openapi.json",
-    openapi_tags=[
-        {"name": "system", "description": "Health checks and public application endpoints."},
-        {"name": "authentication", "description": "Login and user provisioning endpoints."},
-        {"name": "organisation", "description": "Branches, departments, and employee endpoints."},
-        {"name": "catalogue", "description": "Categories, products, and suppliers."},
-        {"name": "operations", "description": "Purchase orders, payroll, sales, and ledger entries."},
-    ],
-)
-
-frontend_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend"))
-swagger_ui_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "swagger-ui")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(api_router)
-
-@app.get("/docs", include_in_schema=False)
-def swagger_ui():
-    return get_swagger_ui_html(
-        openapi_url=app.openapi_url,
-        title=f"{app.title} - Swagger UI",
-        swagger_js_url="/swagger-ui/swagger-ui-bundle.js",
-        swagger_css_url="/swagger-ui/swagger-ui.css",
-        swagger_favicon_url="/swagger-ui/favicon-32x32.png",
-    )
-
-@app.get("/health", tags=["system"])
-def health_check():
-    return {"status": "ok"}
-
-AUDIT_EXCLUDED_PATHS = {"/login", "/logout", "/audit/page-view", "/departments/public", "/openapi.json", "/docs", "/redoc"}
+from db import ROOT, close_db, connection_settings, execute, get_db, initialize, query
 
 
-def add_audit_background_task(response, **event):
-    """Attach audit persistence after the response so normal requests stay responsive."""
-    background = StarletteBackgroundTasks()
-    if response.background is not None:
-        background.add_task(response.background)
-    background.add_task(write_audit_log, **event)
-    response.background = background
+def required(name, limit=100):
+    value = request.form.get(name, '').strip()
+    if not value or len(value) > limit:
+        raise ValueError(f'{name.replace("_", " ").title()} is required (maximum {limit} characters).')
+    return value
 
 
-def audit_identity_from_request(request: Request):
-    authorization = request.headers.get("authorization", "")
-    if authorization.lower().startswith("bearer "):
-        token = authorization.split(" ", 1)[1]
-    else:
-        token = request.cookies.get("hw_access_token")
-    if not token:
-        return None
+def integer(name, minimum=0):
     try:
-        payload = jwt.decode(token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
-        email = payload.get("sub")
-        return {"username_or_email": email, "user_id": None} if email else None
-    except JWTError:
-        return None
+        value = int(request.form.get(name, ''))
+    except (ValueError, TypeError):
+        raise ValueError(f'{name.replace("_", " ").title()} must be a whole number.')
+    if not minimum <= value <= 1000000:
+        raise ValueError(f'{name.replace("_", " ").title()} must be between {minimum} and 1,000,000.')
+    return value
 
 
-@app.middleware("http")
-async def audit_protected_api_access(request: Request, call_next):
-    response = await call_next(request)
-    path = request.url.path
-    if path.endswith((".html", ".js", ".css")):
-        response.headers["Cache-Control"] = "no-cache, must-revalidate"
-    identity = audit_identity_from_request(request)
-    if (
-        identity
-        and request.method != "OPTIONS"
-        and path not in AUDIT_EXCLUDED_PATHS
-        and not path.startswith("/assets/")
-        and not path.endswith(".html")
-    ):
-        if response.status_code in (401, 403):
-            action = "ACCESS_DENIED"
-        elif request.method == "GET":
-            action = "DATABASE_QUERY"
-        else:
-            action = "DATABASE_MODIFICATION"
-        add_audit_background_task(
-            response,
-            **identity,
-            action=action,
-            details=f"{request.method} {path} returned {response.status_code}",
-            ip_address=request_ip(request),
-        )
-    return response
+def money(name):
+    try:
+        value = Decimal(request.form.get(name, ''))
+        if not value.is_finite() or value < 0 or value > Decimal('9999999999.99'):
+            raise InvalidOperation
+        if value != value.quantize(Decimal('0.01')):
+            raise InvalidOperation
+        return value
+    except (InvalidOperation, ValueError):
+        raise ValueError(f'{name.replace("_", " ").title()} must be a positive amount or zero, with at most two decimal places.')
 
-@app.get("/", tags=["system"])
-def read_root():
-    frontend_index = os.path.join(frontend_dir, "index.html")
-    return FileResponse(frontend_index)
 
-@app.get("/departments/public", tags=["organisation"])
-def get_public_departments(db: Session = Depends(get_db)):
-    """Public endpoint for login page department dropdown."""
-    departments = db.query(models.Department).order_by(models.Department.departmentname).all()
-    return [{"departmentid": d.departmentid, "departmentname": d.departmentname, "branchid": d.branchid} for d in departments]
+def login_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if g.user is None:
+            return redirect(url_for('login'))
+        return view(*args, **kwargs)
+    return wrapped
 
-def require_role(current_user: models.Employee, *roles: models.RoleType, allow_system_admin: bool = False):
-    role_aliases = {
-        models.RoleType.ADMIN: {"System Administrator"},
-        models.RoleType.BRANCH_MANAGER: {"Branch Manager", "General Manager", "Owner / Executive"},
-        models.RoleType.CASHIER: {"Cashier", "Sales Manager", "Sales Clerk"},
-        models.RoleType.PROCUREMENT_OFFICER: {"Procurement Officer", "Procurement Manager", "Storekeeper", "Warehouse Supervisor", "Inventory Manager"},
-        models.RoleType.ACCOUNTANT: {"Accountant", "Finance Clerk", "Finance Manager"},
-        models.RoleType.HR_STAFF: {"HR Officer", "HR Manager"},
-    }
-    permission_roles = tuple(role for role in roles if role != models.RoleType.ADMIN)
-    permitted_names = set().union(*(role_aliases.get(role, set()) for role in permission_roles))
-    assigned_names = {role.name for role in current_user.erp_roles}
-    assigned_names.update(
-        assignment.role.role_name
-        for assignment in current_user.user_roles
-        if assignment.role is not None
-    )
-    if current_user.roletype == models.RoleType.ADMIN:
-        if allow_system_admin or roles == (models.RoleType.ADMIN,):
+
+def admin_required(view):
+    @wraps(view)
+    @login_required
+    def wrapped(*args, **kwargs):
+        if g.user['role'] != 'Admin':
+            abort(403)
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def create_app(test_config=None):
+    app = Flask(__name__, template_folder=str(ROOT / 'frontend'),
+                static_folder=str(ROOT / 'frontend' / 'assets'), static_url_path='/assets')
+    app.config.update(SECRET_KEY=os.getenv('SECRET_KEY') or secrets.token_hex(32),
+                      MYSQL=connection_settings(), SESSION_COOKIE_HTTPONLY=True,
+                      SESSION_COOKIE_SAMESITE='Lax', MAX_CONTENT_LENGTH=64 * 1024,
+                      SESSION_COOKIE_SECURE=os.getenv('COOKIE_SECURE', 'false').lower() == 'true')
+    if test_config:
+        app.config.update(test_config)
+    app.teardown_appcontext(close_db)
+    app.jinja_env.filters['money'] = lambda value: f'{value or 0:,.2f}'
+
+    @app.before_request
+    def load_user_and_check_form():
+        if request.endpoint == 'static':
             return
-        if not (assigned_names & permitted_names):
-            raise HTTPException(status_code=403, detail="Not authorized for this operation")
-    elif current_user.roletype not in roles and not (assigned_names & permitted_names):
-        raise HTTPException(status_code=403, detail="Not authorized for this operation")
+        session.setdefault('csrf_token', secrets.token_hex(32))
+        if request.method == 'POST':
+            token = request.form.get('csrf_token', '')
+            if not secrets.compare_digest(token, session['csrf_token']):
+                abort(400, 'The form expired. Reload the page and try again.')
+        g.user = None
+        if session.get('user_id'):
+            g.user = query('SELECT id, name, email, role FROM employees WHERE id=%s AND active=1',
+                           (session['user_id'],), one=True)
+            if g.user is None:
+                session.clear()
 
-def employee_name(db: Session, employeeid: int | None):
-    employee = db.query(models.Employee).filter(models.Employee.employeeid == employeeid).first() if employeeid else None
-    return employee.name if employee else "Unknown employee"
+    @app.context_processor
+    def shared_template_values():
+        return {'user': getattr(g, 'user', None), 'currency': os.getenv('CURRENCY', 'UGX')}
 
-def branch_name(db: Session, branchid: int | None):
-    branch = db.query(models.Branch).filter(models.Branch.branchid == branchid).first() if branchid else None
-    return branch.branchname if branch else "Unknown branch"
+    @app.errorhandler(pymysql.IntegrityError)
+    def invalid_relationship(error):
+        get_db().rollback()
+        return render_template('error.html', title='Cannot save this change',
+                               message='A value is already in use, or this record is linked to other records. Check your entries. Remove related records only if they are no longer needed.'), 400
 
-def user_profile(current_user: models.Employee, db: Session):
-    roles = [r.name for r in current_user.erp_roles] or [current_user.roletype.value]
-    permissions = auth.get_user_permissions(db, current_user)
-    return {
-        "employeeid": current_user.employeeid, "name": current_user.name,
-        "email": current_user.email,
-        "profile_photo_url": employee_profile_photo_url(current_user),
-        "roletype": current_user.roletype.value,
-        "departmentid": current_user.departmentid,
-        "department_name": current_user.department.departmentname if current_user.department else None,
-        "branchid": current_user.branchid,
-        "branch_name": current_user.branch.branchname if current_user.branch else None,
-        "roles": roles, "permissions": permissions,
-    }
+    @app.errorhandler(pymysql.MySQLError)
+    def database_error(error):
+        app.logger.error('MySQL request failed (error code %s)', error.args[0] if error.args else 'unknown')
+        return render_template('error.html', title='Database unavailable',
+                               message='Check that MySQL is running and that the simplified database has been initialized. See the README setup instructions.'), 503
 
-def assign_primary_erp_role(db: Session, employee: models.Employee):
-    role_name = {
-        models.RoleType.ADMIN: "System Administrator",
-        models.RoleType.CASHIER: "Cashier",
-        models.RoleType.PROCUREMENT_OFFICER: "Procurement Officer",
-        models.RoleType.ACCOUNTANT: "Accountant",
-        models.RoleType.HR_STAFF: "HR Officer",
-        models.RoleType.BRANCH_MANAGER: "Branch Manager",
-    }[employee.roletype]
-    role = db.query(models.ERPRole).filter_by(name=role_name).first()
-    if not role:
-        role = models.ERPRole(name=role_name)
-        db.add(role)
-        db.flush()
-    if role not in employee.erp_roles:
-        employee.erp_roles.append(role)
+    @app.errorhandler(ValueError)
+    def invalid_form(error):
+        if 'db' in g:
+            get_db().rollback()
+        return render_template('error.html', title='Check your entries', message=str(error)), 400
+
+    @app.errorhandler(400)
+    @app.errorhandler(403)
+    @app.errorhandler(404)
+    def request_error(error):
+        return render_template('error.html', title=f'Error {error.code}', message=error.description), error.code
+
+    @app.route('/login', methods=['GET', 'POST'])
+    @app.route('/login.html', methods=['GET', 'POST'])
+    def login():
+        if request.method == 'POST':
+            email = required('email', 150)
+            employee = query('SELECT * FROM employees WHERE email=%s AND active=1', (email,), one=True)
+            if employee and check_password_hash(employee['password_hash'], request.form.get('password', '')):
+                session.clear()
+                session['user_id'] = employee['id']
+                session['csrf_token'] = secrets.token_hex(32)
+                return redirect(url_for('dashboard'))
+            flash('Incorrect email or password.', 'error')
+        return render_template('login.html', title='Sign in')
+
+    @app.post('/logout')
+    def logout():
+        session.clear()
+        return redirect(url_for('login'))
+
+    @app.get('/')
+    @app.get('/index.html')
+    @login_required
+    def dashboard():
+        counts = query('SELECT COUNT(*) AS products, COALESCE(SUM(stock),0) AS units, '
+                       'COALESCE(SUM(stock <= reorder_level),0) AS low_stock FROM products', one=True)
+        totals = query('SELECT COALESCE(SUM(si.quantity*si.unit_price),0) AS revenue, '
+                       'COUNT(DISTINCT s.id) AS sales FROM sales s JOIN sale_items si ON si.sale_id=s.id', one=True)
+        low_stock = query('SELECT * FROM products WHERE stock <= reorder_level ORDER BY stock, name LIMIT 8')
+        recent = query('SELECT s.id, s.customer_name, s.created_at, SUM(si.quantity*si.unit_price) AS total '
+                       'FROM sales s JOIN sale_items si ON si.sale_id=s.id GROUP BY s.id ORDER BY s.id DESC LIMIT 5')
+        return render_template('index.html', title='Dashboard', counts=counts, totals=totals,
+                               low_stock=low_stock, recent=recent)
+
+    @app.route('/categories.html', methods=['GET', 'POST'])
+    @login_required
+    def categories():
+        if request.method == 'POST':
+            name = required('name')
+            record_id = request.form.get('id')
+            if record_id:
+                execute('UPDATE categories SET name=%s WHERE id=%s', (name, int(record_id)))
+            else:
+                execute('INSERT INTO categories (name) VALUES (%s)', (name,))
+            get_db().commit()
+            flash('Category saved.', 'success')
+            return redirect(url_for('categories'))
+        editing = query('SELECT * FROM categories WHERE id=%s', (request.args.get('edit'),), one=True) if request.args.get('edit') else None
+        rows = query('SELECT c.*, COUNT(p.id) AS product_count FROM categories c LEFT JOIN products p '
+                     'ON p.category_id=c.id GROUP BY c.id ORDER BY c.name')
+        return render_template('categories.html', title='Categories', rows=rows, editing=editing)
+
+    @app.post('/categories/<int:record_id>/delete')
+    @login_required
+    def delete_category(record_id):
+        execute('DELETE FROM categories WHERE id=%s', (record_id,))
+        get_db().commit()
+        flash('Category deleted.', 'success')
+        return redirect(url_for('categories'))
+
+    @app.route('/suppliers.html', methods=['GET', 'POST'])
+    @login_required
+    def suppliers():
+        if request.method == 'POST':
+            values = (required('name'), request.form.get('phone', '').strip(), request.form.get('email', '').strip())
+            if len(values[1]) > 30 or len(values[2]) > 150:
+                raise ValueError('Phone or email is too long.')
+            if request.form.get('id'):
+                execute('UPDATE suppliers SET name=%s, phone=%s, email=%s WHERE id=%s', values + (integer('id', 1),))
+            else:
+                execute('INSERT INTO suppliers (name,phone,email) VALUES (%s,%s,%s)', values)
+            get_db().commit()
+            flash('Supplier saved.', 'success')
+            return redirect(url_for('suppliers'))
+        editing = query('SELECT * FROM suppliers WHERE id=%s', (request.args.get('edit'),), one=True) if request.args.get('edit') else None
+        return render_template('suppliers.html', title='Suppliers', rows=query('SELECT * FROM suppliers ORDER BY name'), editing=editing)
+
+    @app.post('/suppliers/<int:record_id>/delete')
+    @login_required
+    def delete_supplier(record_id):
+        execute('DELETE FROM suppliers WHERE id=%s', (record_id,))
+        get_db().commit()
+        flash('Supplier deleted.', 'success')
+        return redirect(url_for('suppliers'))
+
+    @app.route('/products.html', methods=['GET', 'POST'])
+    @login_required
+    def products():
+        if request.method == 'POST':
+            values = (required('name'), integer('category_id', 1), money('price'), integer('reorder_level'))
+            if request.form.get('id'):
+                execute('UPDATE products SET name=%s, category_id=%s, price=%s, reorder_level=%s WHERE id=%s',
+                        values + (integer('id', 1),))
+            else:
+                execute('INSERT INTO products (name,category_id,price,reorder_level,stock) VALUES (%s,%s,%s,%s,%s)',
+                        values + (integer('stock'),))
+            get_db().commit()
+            flash('Product saved.', 'success')
+            return redirect(url_for('products'))
+        search = request.args.get('q', '').strip()
+        rows = query('SELECT p.*, c.name AS category FROM products p JOIN categories c ON c.id=p.category_id '
+                     'WHERE p.name LIKE %s ORDER BY p.name', ('%' + search + '%',))
+        editing = query('SELECT * FROM products WHERE id=%s', (request.args.get('edit'),), one=True) if request.args.get('edit') else None
+        return render_template('products.html', title='Products & inventory', rows=rows, editing=editing,
+                               categories=query('SELECT * FROM categories ORDER BY name'), search=search)
+
+    @app.post('/products/<int:record_id>/delete')
+    @login_required
+    def delete_product(record_id):
+        execute('DELETE FROM products WHERE id=%s', (record_id,))
+        get_db().commit()
+        flash('Product deleted.', 'success')
+        return redirect(url_for('products'))
+
+    @app.route('/sales.html', methods=['GET', 'POST'])
+    @login_required
+    def sales():
+        if request.method == 'POST':
+            # Combine repeated products before checking stock. Lock rows in ID order.
+            cart = {}
+            product_ids, quantities = request.form.getlist('product_id'), request.form.getlist('quantity')
+            if len(product_ids) != len(quantities) or len(product_ids) > 10:
+                raise ValueError('Invalid sale items.')
+            for product_id, quantity in zip(product_ids, quantities):
+                if not product_id:
+                    continue
+                try:
+                    product_id, quantity = int(product_id), int(quantity)
+                except ValueError:
+                    raise ValueError('Select a product and enter a whole-number quantity.')
+                if quantity < 1 or quantity > 1000000:
+                    raise ValueError('Sale quantities must be between 1 and 1,000,000.')
+                cart[product_id] = cart.get(product_id, 0) + quantity
+            if not cart:
+                raise ValueError('Select at least one product.')
+            customer = request.form.get('customer_name', '').strip() or 'Walk-in customer'
+            if len(customer) > 100:
+                raise ValueError('Customer name is too long.')
+            sale_id = execute('INSERT INTO sales (employee_id,customer_name) VALUES (%s,%s)', (g.user['id'], customer))
+            for product_id, quantity in sorted(cart.items()):
+                product = query('SELECT * FROM products WHERE id=%s FOR UPDATE', (product_id,), one=True)
+                if not product or product['stock'] < quantity:
+                    raise ValueError('Insufficient stock for one of the selected products. No sale was saved.')
+                execute('INSERT INTO sale_items (sale_id,product_id,quantity,unit_price) VALUES (%s,%s,%s,%s)',
+                        (sale_id, product_id, quantity, product['price']))
+                execute('UPDATE products SET stock=stock-%s WHERE id=%s', (quantity, product_id))
+            get_db().commit()
+            flash(f'Sale #{sale_id} saved. Stock has been reduced.', 'success')
+            return redirect(url_for('receipt', sale_id=sale_id))
+        rows = query('SELECT s.*, e.name AS employee, SUM(si.quantity*si.unit_price) AS total '
+                     'FROM sales s JOIN employees e ON e.id=s.employee_id JOIN sale_items si ON si.sale_id=s.id '
+                     'GROUP BY s.id ORDER BY s.id DESC')
+        return render_template('sales.html', title='Sales', rows=rows,
+                               products=query('SELECT * FROM products WHERE stock>0 ORDER BY name'))
+
+    @app.get('/sales/<int:sale_id>')
+    @login_required
+    def receipt(sale_id):
+        sale = query('SELECT s.*, e.name AS employee FROM sales s JOIN employees e ON e.id=s.employee_id '
+                     'WHERE s.id=%s', (sale_id,), one=True)
+        if not sale:
+            abort(404)
+        items = query('SELECT si.*, p.name, si.quantity*si.unit_price AS total FROM sale_items si '
+                      'JOIN products p ON p.id=si.product_id WHERE si.sale_id=%s', (sale_id,))
+        return render_template('receipt.html', title=f'Sale #{sale_id}', sale=sale, items=items,
+                               total=sum(item['total'] for item in items))
+
+    @app.route('/purchase-orders.html', methods=['GET', 'POST'])
+    @login_required
+    def purchases():
+        if request.method == 'POST':
+            product_id, supplier_id = integer('product_id', 1), integer('supplier_id', 1)
+            quantity, unit_cost = integer('quantity', 1), money('unit_cost')
+            product = query('SELECT id FROM products WHERE id=%s FOR UPDATE', (product_id,), one=True)
+            if not product:
+                raise ValueError('Choose an existing product.')
+            execute('INSERT INTO purchases (supplier_id,product_id,employee_id,quantity,unit_cost) VALUES (%s,%s,%s,%s,%s)',
+                    (supplier_id, product_id, g.user['id'], quantity, unit_cost))
+            execute('UPDATE products SET stock=stock+%s WHERE id=%s', (quantity, product_id))
+            get_db().commit()
+            flash('Purchase received. Stock has been increased.', 'success')
+            return redirect(url_for('purchases'))
+        rows = query('SELECT pu.*, p.name AS product, s.name AS supplier, e.name AS employee, '
+                     'pu.quantity*pu.unit_cost AS total FROM purchases pu JOIN products p ON p.id=pu.product_id '
+                     'JOIN suppliers s ON s.id=pu.supplier_id JOIN employees e ON e.id=pu.employee_id ORDER BY pu.id DESC')
+        return render_template('purchase-orders.html', title='Purchases', rows=rows,
+                               products=query('SELECT * FROM products ORDER BY name'),
+                               suppliers=query('SELECT * FROM suppliers ORDER BY name'))
+
+    @app.route('/employees.html', methods=['GET', 'POST'])
+    @admin_required
+    def employees():
+        if request.method == 'POST':
+            name, email, role = required('name'), required('email', 150), required('role')
+            if '@' not in email or role not in ('Admin', 'Staff'):
+                raise ValueError('Provide a valid email and choose Admin or Staff.')
+            password = request.form.get('password', '')
+            record_id = request.form.get('id')
+            if password and len(password) < 8:
+                raise ValueError('Passwords must contain at least eight characters.')
+            if record_id:
+                record_id = integer('id', 1)
+                if record_id == g.user['id'] and role != 'Admin':
+                    raise ValueError('You cannot remove your own administrator access.')
+                execute('UPDATE employees SET name=%s, email=%s, role=%s WHERE id=%s', (name, email, role, record_id))
+                if password:
+                    execute('UPDATE employees SET password_hash=%s WHERE id=%s', (generate_password_hash(password), record_id))
+            else:
+                if not password:
+                    raise ValueError('A password is required for a new employee.')
+                execute('INSERT INTO employees (name,email,role,password_hash) VALUES (%s,%s,%s,%s)',
+                        (name, email, role, generate_password_hash(password)))
+            get_db().commit()
+            flash('Employee saved.', 'success')
+            return redirect(url_for('employees'))
+        editing = query('SELECT id,name,email,role FROM employees WHERE id=%s', (request.args.get('edit'),), one=True) if request.args.get('edit') else None
+        return render_template('employees.html', title='Employees', editing=editing,
+                               rows=query('SELECT id,name,email,role,active FROM employees ORDER BY name'))
+
+    @app.post('/employees/<int:record_id>/toggle')
+    @admin_required
+    def toggle_employee(record_id):
+        if record_id == g.user['id']:
+            raise ValueError('You cannot deactivate your own account.')
+        execute('UPDATE employees SET active=NOT active WHERE id=%s', (record_id,))
+        get_db().commit()
+        flash('Employee status updated.', 'success')
+        return redirect(url_for('employees'))
+
+    @app.route('/settings.html', methods=['GET', 'POST'])
+    @login_required
+    def settings():
+        if request.method == 'POST':
+            row = query('SELECT password_hash FROM employees WHERE id=%s', (g.user['id'],), one=True)
+            if not check_password_hash(row['password_hash'], request.form.get('current_password', '')):
+                raise ValueError('Your current password is incorrect.')
+            password = request.form.get('password', '')
+            if len(password) < 8 or password != request.form.get('confirm_password'):
+                raise ValueError('Use at least eight characters and make sure the new passwords match.')
+            execute('UPDATE employees SET password_hash=%s WHERE id=%s', (generate_password_hash(password), g.user['id']))
+            get_db().commit()
+            flash('Password changed.', 'success')
+            return redirect(url_for('settings'))
+        return render_template('settings.html', title='My account')
+
+    @app.cli.command('init-db')
+    def init_db_command():
+        """Create the seven tables and first administrator; never erase data."""
+        initialize(app.config['MYSQL'])
+        if not query('SELECT id FROM employees WHERE role=%s AND active=1 LIMIT 1', ('Admin',), one=True):
+            name = os.getenv('ADMIN_NAME') or click.prompt('Administrator name')
+            email = os.getenv('ADMIN_EMAIL') or click.prompt('Administrator email')
+            password = os.getenv('ADMIN_PASSWORD') or click.prompt('Administrator password', hide_input=True, confirmation_prompt=True)
+            if len(password) < 8 or '@' not in email:
+                raise click.ClickException('Set a valid ADMIN_EMAIL and an ADMIN_PASSWORD of at least eight characters.')
+            execute('INSERT INTO employees (name,email,password_hash,role) VALUES (%s,%s,%s,%s)',
+                    (name, email, generate_password_hash(password), 'Admin'))
+            get_db().commit()
+        click.echo('Simplified MySQL database ready: ' + app.config['MYSQL']['database'])
+
+    return app
 
 
-def record_login_failure(db: Session, user: Optional[models.Employee], username: str, request: Request, reason: str):
-    now = datetime.utcnow()
-    if user and user.is_active:
-        user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
-        user.last_failed_login_at = now
-        if user.failed_login_attempts >= 5:
-            user.locked_until = now + timedelta(minutes=15)
-            db.add(models.PasswordEvent(
-                user_id=user.employeeid,
-                event_type="ACCOUNT_LOCKED",
-                timestamp=now,
-                ip_address=request_ip(request),
-                reason="Failed sign-in limit reached",
-            ))
-    db.add(models.AuditLog(
-        user_id=user.employeeid if user else None,
-        username_or_email=(user.email or user.name) if user else (username or None),
-        action="LOGIN_FAILED",
-        module="authentication",
-        details=reason,
-        ip_address=request_ip(request),
-    ))
-    db.commit()
+app = create_app()
 
-
-@app.post("/register", response_model=schemas.UserResponse, tags=["authentication"])
-def register_user(
-    user: schemas.UserCreate, 
-    request: Request,
-    db: Session = Depends(get_db), 
-    current_user: models.Employee = Depends(auth.get_current_user)
-):
-    # Only Administrator can provision new users into the system
-    require_role(current_user, models.RoleType.ADMIN)
-    
-    db_user = db.query(models.Employee).filter(models.Employee.email == user.email).first()
-    if db_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    hashed_password = auth.get_password_hash(user.password)
-    new_user = models.Employee(
-        name=user.name,
-        nin=user.nin,
-        email=user.email,
-        hashed_password=hashed_password,
-        must_change_password=True,
-        temporary_password_expires_at=auth.temporary_password_expiry(),
-        phone=user.phone,
-        datehired=user.datehired or datetime.utcnow().date(),
-        salary=user.salary,
-        departmentid=user.departmentid,
-        branchid=user.branchid,
-        supervisorid=user.supervisorid,
-        roletype=user.roletype
-    )
-    db.add(new_user)
-    db.flush()
-    assign_primary_erp_role(db, new_user)
-    db.add(models.PasswordEvent(
-        user_id=new_user.employeeid,
-        event_type="INITIAL_PASSWORD_CREATED",
-        initiated_by_user_id=current_user.employeeid,
-        ip_address=request_ip(request),
-        reason="Temporary initial password issued by administrator",
-    ))
-    db.add(models.AuditLog(
-        user_id=current_user.employeeid,
-        username_or_email=current_user.email or current_user.name,
-        action="USER_ACCOUNT_CREATED",
-        module="admin",
-        entity_type="employee",
-        entity_id=new_user.employeeid,
-        details=f"Created sign-in account for employee #{new_user.employeeid}; temporary password issued",
-        ip_address=request_ip(request),
-    ))
-    db.commit()
-    db.refresh(new_user)
-    return new_user
-
-@app.post("/login", response_model=None, tags=["authentication"])
-async def login_for_access_token(
-    request: Request,
-    response: Response,
-    background_tasks: BackgroundTasks,
-    cookie_only: bool = Query(False, include_in_schema=False),
-    db: Session = Depends(get_db),
-):
-    """
-    Unified Authentication Endpoint with:
-    - Support for JSON payload and Form Data
-    - Name or Email lookup
-    - Role-Based Access Control (RBAC) validation
-    - Attribute-Based Access Control (ABAC) department matching
-    """
-    content_type = request.headers.get("content-type", "")
-    username = ""
-    password = ""
-    selected_dept = None
-    login_type = "staff"
-
-    if "application/json" in content_type:
-        try:
-            body = await request.json()
-            username = str(body.get("username", "")).strip()
-            password = str(body.get("password", ""))
-            selected_dept = body.get("department")
-            login_type = str(body.get("login_type", "staff")).strip().lower()
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid JSON payload")
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) > 1:
+        from flask.cli import ScriptInfo
+        app.cli.main(args=sys.argv[1:], prog_name='python backend/main.py',
+                     obj=ScriptInfo(create_app=lambda: app))
     else:
-        form = await request.form()
-        username = str(form.get("username", "")).strip()
-        password = str(form.get("password", ""))
-        selected_dept = form.get("department")
-        login_type = str(form.get("login_type", "staff")).strip().lower()
-
-    if not username or not password:
-        write_audit_log(action="FAILED_LOGIN", username_or_email=username or None, details="Login attempt missing username or password", ip_address=request_ip(request))
-        raise HTTPException(status_code=400, detail="Username/Email and Password are required")
-
-    if login_type not in {"admin", "staff"}:
-        raise HTTPException(status_code=400, detail="Login type must be 'admin' or 'staff'.")
-
-    admin_name = os.getenv("ADMIN_NAME", "").strip()
-    admin_email = os.getenv("ADMIN_EMAIL", "").strip()
-    admin_password = os.getenv("ADMIN_PASSWORD", "")
-    configured_usernames = {value.lower() for value in (admin_name, admin_email) if value}
-    is_configured_admin_username = username.lower() in configured_usernames
-
-    if login_type == "admin" or is_configured_admin_username:
-        if (
-            not is_configured_admin_username
-            or not admin_password
-            or not secrets.compare_digest(password, admin_password)
-        ):
-            write_audit_log(action="FAILED_LOGIN", username_or_email=username or None, details="Invalid configured administrator credentials", ip_address=request_ip(request))
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect administrator username/email or password.",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        login_type = "admin"
-        user = ensure_configured_admin(db)
-        db.commit()
-    else:
-        # Lookup user by Email OR Full Name (case-insensitive)
-        user = db.query(models.Employee).filter(
-            or_(
-                func.lower(models.Employee.email) == username.lower(),
-                func.lower(models.Employee.name) == username.lower()
-            )
-        ).first()
-
-    if not user or not user.hashed_password or (
-        login_type == "staff" and not auth.verify_password(password, user.hashed_password)
-    ):
-        record_login_failure(db, user, username, request, "Invalid sign-in details")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid sign-in details or department selection.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    now = datetime.utcnow()
-    if not user.is_active or (user.locked_until and user.locked_until > now):
-        record_login_failure(db, user, username, request, "Login blocked by account status or temporary lock")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid sign-in details or department selection.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    # 1. RBAC (Role-Based Access Control) Policy Check:
-    if login_type == "admin":
-        if user.roletype != models.RoleType.ADMIN:
-            write_audit_log(user_id=user.employeeid, username_or_email=user.email or user.name, action="ACCESS_DENIED", details="Non-admin account attempted to use the administrator portal", ip_address=request_ip(request))
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Access Denied (RBAC): Your account role is '{user.roletype.value}'. Only Administrators can log in through the Admin Portal."
-            )
-
-    # 2. ABAC (Attribute-Based Access Control) Policy Check:
-    # If logging in as staff, check department match
-    if login_type == "staff":
-        if user.roletype != models.RoleType.ADMIN:
-            if not selected_dept:
-                record_login_failure(db, user, username, request, "Staff login did not include a department selection")
-                raise HTTPException(status_code=401, detail="Invalid sign-in details or department selection.")
-            user_dept = user.department.departmentname if user.department else ""
-            # Match against department name or department ID
-            is_name_match = user_dept.strip().lower() == str(selected_dept).strip().lower()
-            is_id_match = str(user.departmentid) == str(selected_dept).strip()
-
-            if not (is_name_match or is_id_match):
-                record_login_failure(db, user, username, request, "Staff login attempted with a different department")
-                raise HTTPException(status_code=401, detail="Invalid sign-in details or department selection.")
-
-    if user.must_change_password and user.temporary_password_expires_at and user.temporary_password_expires_at <= now:
-        db.add(models.PasswordEvent(
-            user_id=user.employeeid,
-            event_type="TEMP_PASSWORD_EXPIRED",
-            timestamp=now,
-            ip_address=request_ip(request),
-            reason="Temporary password expired before first use",
-        ))
-        db.add(models.AuditLog(
-            user_id=user.employeeid,
-            username_or_email=user.email or user.name,
-            action="TEMP_PASSWORD_EXPIRED",
-            module="authentication",
-            details="Temporary sign-in password expired",
-            ip_address=request_ip(request),
-        ))
-        db.commit()
-        raise HTTPException(status_code=401, detail="Invalid sign-in details or department selection.")
-
-    dept_name = user.department.departmentname if user.department else "General"
-    user.failed_login_attempts = 0
-    user.last_failed_login_at = None
-    user.locked_until = None
-    user.last_login_at = now
-    if user.must_change_password:
-        access_token = auth.create_access_token(
-            data={
-                "sub": user.email,
-                "purpose": "initial-password-change",
-                "tv": user.token_version or 0,
-            },
-            expires_delta=timedelta(minutes=15),
-        )
-        response.set_cookie(
-            key="hw_access_token",
-            value=access_token,
-            max_age=15 * 60,
-            path="/",
-            secure=auth.COOKIE_SECURE,
-            httponly=True,
-            samesite="lax",
-        )
-        db.add(models.AuditLog(
-            user_id=user.employeeid,
-            username_or_email=user.email or user.name,
-            action="LOGIN_SUCCESS",
-            module="authentication",
-            details="Temporary password accepted; password change required",
-            ip_address=request_ip(request),
-        ))
-        db.commit()
-        return {
-            "requires_password_change": True,
-            "next_route": "change-password.html",
-        }
-
-    db.commit()
-    access_token = auth.create_access_token(
-        data={
-            "sub": user.email, 
-            "name": user.name,
-            "role": user.roletype.value,
-            "departmentid": user.departmentid,
-            "departmentname": dept_name,
-            "branchid": user.branchid,
-            "tv": user.token_version or 0,
-        }, 
-        expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
-    background_tasks.add_task(
-        write_audit_log,
-        user_id=user.employeeid,
-        username_or_email=user.email or user.name,
-        action="LOGIN_SUCCESS",
-        details=f"Successful {login_type} portal login",
-        ip_address=request_ip(request),
-    )
-    response.set_cookie(
-        key="hw_access_token",
-        value=access_token,
-        max_age=auth.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        path="/",
-        secure=auth.COOKIE_SECURE,
-        httponly=True,
-        samesite="lax",
-    )
-    if cookie_only:
-        return {"detail": "Authenticated"}
-    return {"access_token": access_token, "token_type": "bearer"}
-
-@app.post("/logout")
-def logout(
-    request: Request,
-    response: Response,
-    background_tasks: BackgroundTasks,
-    current_user: models.Employee = Depends(auth.get_current_user),
-    db: Session = Depends(get_db),
-):
-    current_user.token_version = (current_user.token_version or 0) + 1
-    db.commit()
-    response.delete_cookie(
-        key="hw_access_token",
-        path="/",
-        secure=auth.COOKIE_SECURE,
-        httponly=True,
-        samesite="lax",
-    )
-    background_tasks.add_task(
-        write_audit_log,
-        user_id=current_user.employeeid,
-        username_or_email=current_user.email or current_user.name,
-        action="LOGOUT",
-        details="User signed out",
-        ip_address=request_ip(request),
-    )
-    return {"detail": "Logged out"}
-
-
-@app.post("/audit/page-view")
-def record_page_view(
-    payload: schemas.AuditPageView,
-    request: Request,
-    background_tasks: BackgroundTasks,
-    current_user: models.Employee = Depends(auth.get_current_user),
-):
-    background_tasks.add_task(
-        write_audit_log,
-        user_id=current_user.employeeid,
-        username_or_email=current_user.email or current_user.name,
-        action="VIEW_PAGE",
-        details=f"Viewed protected page: {payload.page[:255]}",
-        ip_address=request_ip(request),
-    )
-    return {"detail": "Page view recorded"}
-
-@app.get("/users/me", tags=["authentication"])
-def read_users_me(db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    return user_profile(current_user, db)
-
-
-@app.get("/audit-logs", response_model=schemas.AuditLogPage)
-def get_audit_logs(
-    user: Optional[str] = Query(None, max_length=100),
-    action: Optional[str] = Query(None, max_length=64),
-    start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(25, ge=1, le=100),
-    db: Session = Depends(get_db),
-    current_user: models.Employee = Depends(auth.get_current_user),
-):
-    require_role(current_user, models.RoleType.ADMIN)
-    query = db.query(models.AuditLog)
-    if user:
-        if user.isdigit():
-            query = query.filter(or_(models.AuditLog.user_id == int(user), models.AuditLog.username_or_email.ilike(f"%{user}%")))
-        else:
-            query = query.filter(models.AuditLog.username_or_email.ilike(f"%{user}%"))
-    if action:
-        query = query.filter(models.AuditLog.action == action)
-    if start_date:
-        query = query.filter(models.AuditLog.timestamp >= start_date)
-    if end_date:
-        query = query.filter(models.AuditLog.timestamp <= end_date)
-
-    total = query.count()
-    items = query.order_by(models.AuditLog.timestamp.desc(), models.AuditLog.auditlogid.desc()).offset((page - 1) * page_size).limit(page_size).all()
-    return {"items": items, "total": total, "page": page, "page_size": page_size}
-
-
-# Example of a protected endpoint
-@app.get("/branches", response_model=list[schemas.BranchResponse], tags=["organisation"])
-def get_branches(db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    query = db.query(models.Branch)
-    if current_user.roletype != models.RoleType.ADMIN:
-        query = query.filter(models.Branch.branchid == current_user.branchid)
-    branches = query.all()
-    return branches
-
-@app.post("/branches", response_model=schemas.BranchResponse, tags=["organisation"])
-def create_branch(branch: schemas.BranchCreate, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN)
-    new_branch = models.Branch(**branch.dict())
-    db.add(new_branch)
-    db.commit()
-    db.refresh(new_branch)
-    return new_branch
-
-@app.get("/departments", tags=["organisation"])
-def get_departments(db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    query = db.query(models.Department)
-    if current_user.roletype != models.RoleType.ADMIN:
-        query = query.filter(models.Department.branchid == current_user.branchid)
-    return [{"departmentid": d.departmentid, "departmentname": d.departmentname, "branchid": d.branchid, "branch_name": branch_name(db, d.branchid)} for d in query.order_by(models.Department.departmentname).all()]
-
-@app.get("/categories", tags=["catalogue"])
-def get_categories(db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    return [{"categoryid": c.categoryid, "categoryname": c.categoryname} for c in db.query(models.Category).order_by(models.Category.categoryname).all()]
-
-@app.post("/categories", tags=["catalogue"])
-def create_category(payload: schemas.CategoryCreate, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.PROCUREMENT_OFFICER)
-    category = models.Category(categoryname=payload.categoryname); db.add(category); db.commit(); db.refresh(category)
-    return {"categoryid": category.categoryid, "categoryname": category.categoryname}
-
-@app.get("/products", tags=["catalogue"])
-@app.get("/api/v1/inventory/products", tags=["catalogue"])
-def get_products(db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    products = db.query(models.Product).order_by(models.Product.itemname).all()
-    result = []
-    for p in products:
-        balance = db.query(func.coalesce(func.sum(models.ERPStockBalance.quantity), 0)).filter_by(itemid=p.itemid, branch_id=current_user.branchid).scalar() or 0
-        result.append({"itemid": p.itemid, "itemname": p.itemname, "description": p.description, "unitprice": str(p.unitprice), "reorderlevel": p.reorderlevel or 0, "categoryid": p.categoryid, "category_name": p.category.categoryname if p.category else "Unknown category", "is_active": p.is_active, "stock_qty": str(balance)})
-    return result
-
-@app.get("/inventory/balances", tags=["catalogue"])
-@app.get("/api/v1/inventory/balances", tags=["catalogue"])
-def get_inventory_balances(db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    query = db.query(models.ERPStockBalance).filter_by(branch_id=current_user.branchid)
-    if not auth.has_any_role(current_user, models.RoleType.PROCUREMENT_OFFICER, models.RoleType.BRANCH_MANAGER):
-        require_role(current_user, models.RoleType.CASHIER, models.RoleType.ACCOUNTANT, models.RoleType.HR_STAFF)
-    return [{"itemid": b.itemid, "branch_id": b.branch_id, "warehouse_id": b.warehouse_id, "quantity": str(b.quantity), "updated_at": b.updated_at} for b in query.order_by(models.ERPStockBalance.itemid).all()]
-
-@app.post("/products", tags=["catalogue"])
-def create_product(payload: schemas.ProductCreate, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.PROCUREMENT_OFFICER)
-    product = models.Product(**payload.model_dump()); db.add(product); db.commit(); db.refresh(product)
-    return {"itemid": product.itemid, "itemname": product.itemname}
-
-@app.get("/suppliers", tags=["catalogue"])
-def get_suppliers(db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    return [{"supplierid": s.supplierid, "suppliername": s.suppliername, "contactperson": s.contactperson, "phone": s.phone, "address": s.address} for s in db.query(models.Supplier).order_by(models.Supplier.suppliername).all()]
-
-@app.post("/suppliers", tags=["catalogue"])
-def create_supplier(payload: schemas.SupplierCreate, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.PROCUREMENT_OFFICER)
-    supplier = models.Supplier(**payload.model_dump()); db.add(supplier); db.commit(); db.refresh(supplier)
-    return {"supplierid": supplier.supplierid, "suppliername": supplier.suppliername}
-
-@app.get("/employees", tags=["organisation"])
-def get_employees(db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.HR_STAFF, models.RoleType.ACCOUNTANT, allow_system_admin=True)
-    employees = db.query(models.Employee).order_by(models.Employee.name).all()
-    return [{
-        "employeeid": e.employeeid,
-        "name": e.name,
-        "profile_photo_url": employee_profile_photo_url(e),
-        "email": e.email,
-        "nin": e.nin,
-        "phone": e.phone,
-        "datehired": e.datehired,
-        "salary": float(e.salary or 0) if (
-            auth.has_any_role(current_user, models.RoleType.HR_STAFF, models.RoleType.ACCOUNTANT)
-            or auth.has_permission(db, current_user, "payroll:view")
-        ) else None,
-        "roletype": e.roletype.value,
-        "departmentid": e.departmentid,
-        "department_name": e.department.departmentname if e.department else "Unknown department",
-        "branchid": e.branchid,
-        "branch_name": branch_name(db, e.branchid),
-        "supervisorid": e.supervisorid,
-        "supervisor_name": employee_name(db, e.supervisorid),
-        "account_status": (
-            "INACTIVE" if not e.is_active
-            else "LOCKED" if e.locked_until and e.locked_until > datetime.utcnow()
-            else "PENDING_ACTIVATION" if not e.hashed_password
-            else "PASSWORD_CHANGE_REQUIRED" if e.must_change_password
-            else "ACTIVE"
-        ),
-        "is_locked": bool(e.is_active and e.locked_until and e.locked_until > datetime.utcnow()),
-    } for e in employees]
-
-@app.post("/employees", tags=["organisation"])
-def create_employee(payload: schemas.EmployeeCreate, request: Request, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.HR_STAFF, allow_system_admin=True)
-    if payload.email and db.query(models.Employee).filter(func.lower(models.Employee.email) == payload.email.lower()).first():
-        raise HTTPException(status_code=409, detail="An employee account already uses this email.")
-    if current_user.roletype != models.RoleType.ADMIN and payload.password:
-        raise HTTPException(status_code=403, detail="Only a System Administrator can issue employee passwords.")
-    temporary_password = None
-    expires_at = None
-    if current_user.roletype == models.RoleType.ADMIN:
-        if not payload.email:
-            raise HTTPException(status_code=422, detail="An email address is required for a sign-in account.")
-        temporary_password = payload.password or auth.generate_temporary_password()
-        expires_at = auth.temporary_password_expiry()
-    employee = models.Employee(
-        name=payload.name,
-        nin=payload.nin,
-        email=payload.email,
-        hashed_password=auth.get_password_hash(temporary_password) if temporary_password else None,
-        must_change_password=temporary_password is not None,
-        temporary_password_expires_at=expires_at,
-        phone=payload.phone,
-        datehired=payload.datehired,
-        salary=payload.salary,
-        departmentid=payload.departmentid,
-        branchid=payload.branchid,
-        supervisorid=payload.supervisorid,
-        roletype=payload.roletype,
-    )
-    db.add(employee); db.flush()
-    assign_primary_erp_role(db, employee)
-    if payload.roletype == models.RoleType.BRANCH_MANAGER and payload.managementlevel == "Owner / Executive":
-        executive_role = db.query(models.ERPRole).filter_by(name="Owner / Executive").first()
-        if not executive_role:
-            executive_role = models.ERPRole(name="Owner / Executive")
-            db.add(executive_role)
-            db.flush()
-        if executive_role not in employee.erp_roles:
-            employee.erp_roles.append(executive_role)
-    subtype = {models.RoleType.CASHIER: models.Cashier(employeeid=employee.employeeid, pos_terminalid=payload.pos_terminalid or "unassigned"), models.RoleType.PROCUREMENT_OFFICER: models.ProcurementOfficer(employeeid=employee.employeeid, approvallimit=payload.approvallimit or 0), models.RoleType.ACCOUNTANT: models.Accountant(employeeid=employee.employeeid, certificationnumber=payload.certificationnumber), models.RoleType.HR_STAFF: models.HRStaff(employeeid=employee.employeeid, hr_role=payload.hr_role or "HR"), models.RoleType.BRANCH_MANAGER: models.BranchManager(employeeid=employee.employeeid, managementlevel=payload.managementlevel)}.get(payload.roletype)
-    if subtype: db.add(subtype)
-    if temporary_password:
-        db.add(models.PasswordEvent(
-            user_id=employee.employeeid,
-            event_type="INITIAL_PASSWORD_CREATED",
-            initiated_by_user_id=current_user.employeeid,
-            ip_address=request_ip(request),
-            reason="Temporary initial password issued by administrator",
-        ))
-        db.add(models.AuditLog(
-            user_id=current_user.employeeid,
-            username_or_email=current_user.email or current_user.name,
-            action="USER_ACCOUNT_CREATED",
-            module="admin",
-            entity_type="employee",
-            entity_id=employee.employeeid,
-            details=f"Created sign-in account for employee #{employee.employeeid}; temporary password issued",
-            ip_address=request_ip(request),
-        ))
-    db.commit(); db.refresh(employee)
-    result = {"employeeid": employee.employeeid, "name": employee.name}
-    if temporary_password:
-        result.update({
-            "temporary_password": temporary_password,
-            "temporary_password_expires_at": expires_at.isoformat(),
-            "must_change_password": True,
-        })
-    return result
-
-@app.get("/purchase-orders", tags=["operations"])
-@app.get("/api/v1/procurement/purchase-orders", tags=["operations"])
-def get_purchase_orders(db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.PROCUREMENT_OFFICER, models.RoleType.ACCOUNTANT, models.RoleType.BRANCH_MANAGER)
-    query = db.query(models.PurchaseOrder)
-    if current_user.roletype != models.RoleType.ADMIN:
-        query = query.filter(models.PurchaseOrder.branch_id == current_user.branchid)
-    orders = query.order_by(models.PurchaseOrder.orderdate.desc()).all()
-    return [{"po_id": o.po_id, "orderdate": o.orderdate, "status": o.status.value, "branch_id": o.branch_id, "supplier_name": db.query(models.Supplier).filter(models.Supplier.supplierid == o.supplierid).first().suppliername if db.query(models.Supplier).filter(models.Supplier.supplierid == o.supplierid).first() else "Unknown supplier", "officer_name": employee_name(db, o.employeeid), "items": [{"id": line.id, "itemid": line.itemid, "item_name": db.query(models.Product).filter_by(itemid=line.itemid).first().itemname, "quantity": str(line.quantity), "received_quantity": str(line.received_quantity), "remaining_quantity": str(line.quantity - line.received_quantity), "unit_cost": str(line.unit_cost)} for line in db.query(models.ERPPurchaseOrderItem).filter_by(po_id=o.po_id).all()]} for o in orders]
-
-@app.get("/purchase-requisitions", tags=["operations"])
-@app.get("/api/v1/procurement/requisitions", tags=["operations"])
-def get_purchase_requisitions(db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.PROCUREMENT_OFFICER, models.RoleType.BRANCH_MANAGER)
-    query = db.query(models.ERPPurchaseRequisition)
-    if current_user.roletype != models.RoleType.ADMIN:
-        query = query.filter(models.ERPPurchaseRequisition.branch_id == current_user.branchid)
-    return [{"id": r.id, "reference": r.reference, "branch_id": r.branch_id, "requested_by": employee_name(db, r.requested_by), "status": r.status, "notes": r.notes, "created_at": r.created_at, "items": [{"itemid": i.itemid, "item_name": db.query(models.Product).filter_by(itemid=i.itemid).first().itemname, "quantity": str(i.quantity), "estimated_unit_cost": str(i.estimated_unit_cost)} for i in db.query(models.ERPPurchaseRequisitionItem).filter_by(requisition_id=r.id).all()]} for r in query.order_by(models.ERPPurchaseRequisition.created_at.desc()).all()]
-
-@app.post("/purchase-requisitions", tags=["operations"])
-@app.post("/api/v1/procurement/requisitions", tags=["operations"])
-def create_purchase_requisition(payload: schemas.PurchaseRequisitionCreate, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.PROCUREMENT_OFFICER)
-    if not current_user.branchid or not payload.items:
-        raise HTTPException(400, "A branch and at least one requisition line are required")
-    requisition = models.ERPPurchaseRequisition(reference=f"PR-{uuid.uuid4().hex[:10].upper()}", branch_id=current_user.branchid, requested_by=current_user.employeeid, notes=payload.notes, status="PENDING")
-    db.add(requisition); db.flush()
-    for line in payload.items:
-        if not db.query(models.Product).filter_by(itemid=line.itemid).first():
-            raise HTTPException(404, f"Product {line.itemid} was not found")
-        db.add(models.ERPPurchaseRequisitionItem(requisition_id=requisition.id, itemid=line.itemid, quantity=line.quantity, estimated_unit_cost=line.estimated_unit_cost))
-    db.add(models.ERPAuditLog(user_id=current_user.employeeid, action="REQUISITION_CREATED", module="procurement", entity_type="purchase_requisition", entity_id=str(requisition.id), branch_id=current_user.branchid))
-    db.commit()
-    return {"id": requisition.id, "reference": requisition.reference, "status": requisition.status}
-
-@app.post("/purchase-requisitions/{requisition_id}/approve", tags=["operations"])
-@app.post("/api/v1/procurement/requisitions/{requisition_id}/approve", tags=["operations"])
-def approve_purchase_requisition(requisition_id: int, payload: schemas.ApprovalDecision, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.BRANCH_MANAGER)
-    requisition = db.query(models.ERPPurchaseRequisition).filter_by(id=requisition_id).with_for_update().first()
-    if not requisition:
-        raise HTTPException(404, "Requisition not found")
-    if requisition.status != "PENDING":
-        raise HTTPException(409, "Only pending requisitions can be approved")
-    if requisition.requested_by == current_user.employeeid:
-        raise HTTPException(403, "A requester cannot approve their own requisition")
-    if current_user.roletype != models.RoleType.ADMIN and requisition.branch_id != current_user.branchid:
-        raise HTTPException(403, "Requisition is outside your branch scope")
-    requisition.status = "APPROVED"
-    db.add(models.ERPPurchaseRequisitionApproval(requisition_id=requisition.id, requested_by=requisition.requested_by, approved_by=current_user.employeeid, decision="APPROVED", reason=payload.reason))
-    db.add(models.ERPAuditLog(user_id=current_user.employeeid, action="REQUISITION_APPROVED", module="procurement", entity_type="purchase_requisition", entity_id=str(requisition.id), branch_id=requisition.branch_id, details_json=payload.reason))
-    db.commit()
-    return {"id": requisition.id, "status": requisition.status}
-
-@app.post("/purchase-orders", tags=["operations"])
-@app.post("/api/v1/procurement/purchase-orders", tags=["operations"])
-def create_purchase_order(payload: schemas.PurchaseOrderCreate, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.PROCUREMENT_OFFICER)
-    if not payload.requisition_id:
-        raise HTTPException(400, "An approved requisition is required to create a purchase order")
-    requisition = db.query(models.ERPPurchaseRequisition).filter_by(id=payload.requisition_id).with_for_update().first()
-    if not requisition or requisition.status != "APPROVED":
-        raise HTTPException(409, "Purchase order requires an approved requisition")
-    if current_user.roletype != models.RoleType.ADMIN and requisition.branch_id != current_user.branchid:
-        raise HTTPException(403, "Requisition is outside your branch scope")
-    if requisition.requested_by == current_user.employeeid:
-        raise HTTPException(403, "A requisition requester cannot create its purchase order")
-    supplier = db.query(models.Supplier).filter_by(supplierid=payload.supplierid).first()
-    if not supplier:
-        raise HTTPException(404, "Supplier not found")
-    order = models.PurchaseOrder(supplierid=payload.supplierid, employeeid=current_user.employeeid, branch_id=requisition.branch_id, requisition_id=requisition.id, status=models.POStatus.PENDING)
-    db.add(order); db.flush()
-    for line in db.query(models.ERPPurchaseRequisitionItem).filter_by(requisition_id=requisition.id).all():
-        db.add(models.ERPPurchaseOrderItem(po_id=order.po_id, itemid=line.itemid, quantity=line.quantity, unit_cost=line.estimated_unit_cost))
-    requisition.status = "CONVERTED"
-    db.add(models.ERPAuditLog(user_id=current_user.employeeid, action="PURCHASE_ORDER_CREATED", module="procurement", entity_type="purchase_order", entity_id=str(order.po_id), branch_id=requisition.branch_id))
-    db.commit(); db.refresh(order)
-    return {"po_id": order.po_id, "status": order.status.value, "branch_id": order.branch_id}
-
-@app.post("/purchase-orders/{po_id}/approve", tags=["operations"])
-@app.post("/api/v1/procurement/purchase-orders/{po_id}/approve", tags=["operations"])
-def approve_purchase_order(po_id: int, payload: schemas.ApprovalDecision, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.BRANCH_MANAGER, models.RoleType.PROCUREMENT_OFFICER)
-    order = db.query(models.PurchaseOrder).filter_by(po_id=po_id).with_for_update().first()
-    if not order:
-        raise HTTPException(404, "Purchase order not found")
-    if current_user.roletype != models.RoleType.ADMIN and order.branch_id != current_user.branchid:
-        raise HTTPException(403, "Purchase order is outside your branch scope")
-    if order.status != models.POStatus.PENDING:
-        raise HTTPException(409, "Only pending purchase orders can be approved")
-    if order.employeeid == current_user.employeeid:
-        raise HTTPException(403, "A purchase order creator cannot approve their own order")
-    amount = sum((line.quantity * line.unit_cost for line in db.query(models.ERPPurchaseOrderItem).filter_by(po_id=po_id).all()), Decimal("0"))
-    officer = db.query(models.ProcurementOfficer).filter_by(employeeid=current_user.employeeid).first()
-    if officer and amount > officer.approvallimit:
-        raise HTTPException(403, "Purchase order exceeds your approval limit")
-    order.status = models.POStatus.APPROVED
-    db.add(models.ERPPurchaseOrderApproval(po_id=po_id, requested_by=order.employeeid, approved_by=current_user.employeeid, decision="APPROVED", reason=payload.reason))
-    db.add(models.ERPAuditLog(user_id=current_user.employeeid, action="PURCHASE_ORDER_APPROVED", module="procurement", entity_type="purchase_order", entity_id=str(po_id), branch_id=order.branch_id, details_json=payload.reason))
-    db.commit()
-    return {"po_id": po_id, "status": order.status.value}
-
-@app.post("/goods-received-notes", tags=["operations"])
-@app.post("/api/v1/procurement/goods-received-notes", tags=["operations"])
-def create_goods_received_note(payload: schemas.GRNCreate, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.PROCUREMENT_OFFICER)
-    order = db.query(models.PurchaseOrder).filter_by(po_id=payload.po_id).with_for_update().first()
-    if not order or order.status not in (models.POStatus.APPROVED, models.POStatus.PARTIALLY_RECEIVED):
-        raise HTTPException(409, "Goods can only be received against an approved, open PO")
-    if current_user.roletype != models.RoleType.ADMIN and order.branch_id != current_user.branchid:
-        raise HTTPException(403, "Purchase order is outside your branch scope")
-    approval = db.query(models.ERPPurchaseOrderApproval).filter_by(po_id=order.po_id, decision="APPROVED").order_by(models.ERPPurchaseOrderApproval.id.desc()).first()
-    requisition = db.query(models.ERPPurchaseRequisition).filter_by(id=order.requisition_id).first() if order.requisition_id else None
-    if not approval or current_user.employeeid in {order.employeeid, approval.approved_by} or (requisition and current_user.employeeid == requisition.requested_by):
-        raise HTTPException(403, "Receiver must be different from the PO requester and approver")
-    if not payload.items:
-        raise HTTPException(400, "At least one received line is required")
-    warehouse = db.query(models.ERPWarehouse).filter_by(branch_id=order.branch_id, is_active=True).first()
-    if not warehouse:
-        warehouse = models.ERPWarehouse(branch_id=order.branch_id, name="Main Warehouse"); db.add(warehouse); db.flush()
-    grn = models.ERPGoodsReceivedNote(reference=f"GRN-{uuid.uuid4().hex[:10].upper()}", po_id=order.po_id, branch_id=order.branch_id, warehouse_id=warehouse.id, received_by=current_user.employeeid)
-    db.add(grn); db.flush()
-    lines = []
-    for received in payload.items:
-        po_line = db.query(models.ERPPurchaseOrderItem).filter_by(id=received.po_item_id, po_id=order.po_id).with_for_update().first()
-        if not po_line or po_line.received_quantity + received.quantity > po_line.quantity:
-            raise HTTPException(409, "Received quantity exceeds the remaining approved quantity")
-        po_line.received_quantity += received.quantity
-        db.add(models.ERPGoodsReceivedNoteItem(grn_id=grn.id, po_item_id=po_line.id, quantity=received.quantity))
-        balance = db.query(models.ERPStockBalance).filter_by(itemid=po_line.itemid, branch_id=order.branch_id, warehouse_id=warehouse.id).with_for_update().first()
-        if not balance:
-            balance = models.ERPStockBalance(itemid=po_line.itemid, branch_id=order.branch_id, warehouse_id=warehouse.id, quantity=0); db.add(balance)
-        balance.quantity += received.quantity
-        db.add(models.ERPInventoryMovement(itemid=po_line.itemid, branch_id=order.branch_id, warehouse_id=warehouse.id, movement_type="GRN_IN", quantity=received.quantity, reference_type="GRN", reference_id=grn.id, created_by=current_user.employeeid))
-        lines.append(po_line)
-    complete = all(line.received_quantity >= line.quantity for line in db.query(models.ERPPurchaseOrderItem).filter_by(po_id=order.po_id).all())
-    order.status = models.POStatus.RECEIVED if complete else models.POStatus.PARTIALLY_RECEIVED
-    db.add(models.ERPAuditLog(user_id=current_user.employeeid, action="GOODS_RECEIVED", module="procurement", entity_type="goods_received_note", entity_id=str(grn.id), branch_id=order.branch_id))
-    db.commit()
-    return {"id": grn.id, "reference": grn.reference, "status": grn.status, "po_status": order.status.value}
-
-@app.post("/supplier-invoices", tags=["operations"])
-@app.post("/api/v1/finance/supplier-invoices", tags=["operations"])
-def create_supplier_invoice(payload: schemas.SupplierInvoiceCreate, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.ACCOUNTANT)
-    order = db.query(models.PurchaseOrder).filter_by(po_id=payload.po_id).first()
-    grn = db.query(models.ERPGoodsReceivedNote).filter_by(id=payload.grn_id, po_id=payload.po_id, status="CONFIRMED").first()
-    if not order or not grn or order.status not in (models.POStatus.PARTIALLY_RECEIVED, models.POStatus.RECEIVED):
-        raise HTTPException(409, "Invoice requires an approved PO and confirmed GRN")
-    if current_user.roletype != models.RoleType.ADMIN and order.branch_id != current_user.branchid:
-        raise HTTPException(403, "Purchase order is outside your branch scope")
-    if grn.received_by == current_user.employeeid:
-        raise HTTPException(403, "The goods receiver cannot record the supplier invoice")
-    invoice = models.ERPSupplierInvoice(invoice_number=payload.invoice_number, po_id=order.po_id, grn_id=grn.id, branch_id=order.branch_id, amount=payload.amount, created_by=current_user.employeeid)
-    db.add(invoice); db.flush()
-    db.add(models.ERPAuditLog(user_id=current_user.employeeid, action="SUPPLIER_INVOICE_RECORDED", module="finance", entity_type="supplier_invoice", entity_id=str(invoice.id), branch_id=order.branch_id))
-    db.commit()
-    return {"id": invoice.id, "status": invoice.status}
-
-@app.post("/supplier-invoices/{invoice_id}/match", tags=["operations"])
-@app.post("/api/v1/finance/supplier-invoices/{invoice_id}/match", tags=["operations"])
-def match_supplier_invoice(invoice_id: int, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.ACCOUNTANT)
-    invoice = db.query(models.ERPSupplierInvoice).filter_by(id=invoice_id).with_for_update().first()
-    if not invoice:
-        raise HTTPException(404, "Supplier invoice not found")
-    if current_user.roletype != models.RoleType.ADMIN and invoice.branch_id != current_user.branchid:
-        raise HTTPException(403, "Invoice is outside your branch scope")
-    received = db.query(models.ERPGoodsReceivedNoteItem, models.ERPPurchaseOrderItem).join(models.ERPPurchaseOrderItem, models.ERPGoodsReceivedNoteItem.po_item_id == models.ERPPurchaseOrderItem.id).filter(models.ERPGoodsReceivedNoteItem.grn_id == invoice.grn_id).all()
-    expected = sum((grn_line.quantity * po_line.unit_cost for grn_line, po_line in received), Decimal("0")).quantize(Decimal("0.01"))
-    received_qty = sum((grn_line.quantity for grn_line, _ in received), Decimal("0"))
-    ordered_qty = sum((line.quantity for line in db.query(models.ERPPurchaseOrderItem).filter_by(po_id=invoice.po_id).all()), Decimal("0"))
-    matched = expected == invoice.amount and bool(received)
-    db.add(models.ERPInvoiceMatchResult(invoice_id=invoice.id, matched=matched, ordered_quantity=ordered_qty, received_quantity=received_qty, invoiced_amount=invoice.amount, expected_amount=expected, checked_by=current_user.employeeid))
-    invoice.status = "MATCHED" if matched else "VARIANCE"
-    if matched:
-        journal = models.ERPJournalEntry(reference_type="SUPPLIER_INVOICE", reference_id=invoice.id, branch_id=invoice.branch_id, created_by=current_user.employeeid)
-        db.add(journal); db.flush()
-        db.add_all([models.ERPJournalLine(journal_id=journal.id, account_code="1200", account_name="Inventory Asset", debit=expected, credit=0), models.ERPJournalLine(journal_id=journal.id, account_code="2000", account_name="Accounts Payable", debit=0, credit=expected)])
-    db.add(models.ERPAuditLog(user_id=current_user.employeeid, action="SUPPLIER_INVOICE_MATCHED" if matched else "SUPPLIER_INVOICE_VARIANCE", module="finance", entity_type="supplier_invoice", entity_id=str(invoice.id), branch_id=invoice.branch_id))
-    db.commit()
-    if not matched:
-        raise HTTPException(409, f"Three-way match variance: invoice UGX {invoice.amount} does not match GRN value UGX {expected}")
-    return {"invoice_id": invoice.id, "matched": True, "expected_amount": str(expected), "received_quantity": str(received_qty)}
-
-@app.post("/supplier-payments", tags=["operations"])
-@app.post("/api/v1/finance/supplier-payments", tags=["operations"])
-def pay_supplier_invoice(payload: schemas.SupplierPaymentCreate, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.ACCOUNTANT)
-    if current_user.roletype != models.RoleType.ADMIN and not any(role.name in {"Finance Manager", "Owner / Executive"} for role in current_user.erp_roles):
-        raise HTTPException(403, "Supplier payments require Finance Manager or Owner approval")
-    invoice = db.query(models.ERPSupplierInvoice).filter_by(id=payload.invoice_id).with_for_update().first()
-    if not invoice or invoice.status not in {"MATCHED", "PARTIALLY_PAID"}:
-        raise HTTPException(409, "Only a three-way matched supplier invoice can be paid")
-    if current_user.roletype != models.RoleType.ADMIN and invoice.branch_id != current_user.branchid:
-        raise HTTPException(403, "Invoice is outside your branch scope")
-    match = db.query(models.ERPInvoiceMatchResult).filter_by(invoice_id=invoice.id, matched=True).order_by(models.ERPInvoiceMatchResult.created_at.desc()).first()
-    if not match:
-        raise HTTPException(409, "A successful PO + GRN + invoice match is required")
-    grn = db.query(models.ERPGoodsReceivedNote).filter_by(id=invoice.grn_id).first()
-    order = db.query(models.PurchaseOrder).filter_by(po_id=invoice.po_id).first()
-    requisition = db.query(models.ERPPurchaseRequisition).filter_by(id=order.requisition_id).first() if order and order.requisition_id else None
-    po_approval = db.query(models.ERPPurchaseOrderApproval).filter_by(po_id=invoice.po_id, decision="APPROVED").order_by(models.ERPPurchaseOrderApproval.id.desc()).first()
-    separation_ids = {invoice.created_by, match.checked_by}
-    if grn: separation_ids.add(grn.received_by)
-    if order: separation_ids.add(order.employeeid)
-    if requisition: separation_ids.add(requisition.requested_by)
-    if po_approval: separation_ids.add(po_approval.approved_by)
-    if current_user.employeeid in separation_ids:
-        raise HTTPException(403, "Payment approver must differ from requester, PO approver, receiver, invoice recorder, and matcher")
-    paid = db.query(func.coalesce(func.sum(models.ERPSupplierPayment.amount), 0)).filter_by(invoice_id=invoice.id).scalar() or Decimal("0")
-    if paid + payload.amount > invoice.amount:
-        raise HTTPException(409, "Payment exceeds the unpaid invoice balance")
-    payment = models.ERPSupplierPayment(invoice_id=invoice.id, branch_id=invoice.branch_id, amount=payload.amount, payment_method=payload.payment_method, paid_by=current_user.employeeid)
-    db.add(payment); db.flush()
-    journal = models.ERPJournalEntry(reference_type="SUPPLIER_PAYMENT", reference_id=payment.id, branch_id=invoice.branch_id, created_by=current_user.employeeid)
-    db.add(journal); db.flush()
-    cash_code, cash_name = {"cash": ("1000", "Cash on Hand"), "bank": ("1010", "Bank"), "mobile_money": ("1020", "Mobile Money")} [payload.payment_method]
-    db.add_all([models.ERPJournalLine(journal_id=journal.id, account_code="2000", account_name="Accounts Payable", debit=payload.amount, credit=0), models.ERPJournalLine(journal_id=journal.id, account_code=cash_code, account_name=cash_name, debit=0, credit=payload.amount)])
-    invoice.status = "PAID" if paid + payload.amount == invoice.amount else "PARTIALLY_PAID"
-    db.add(models.ERPAuditLog(user_id=current_user.employeeid, action="SUPPLIER_PAYMENT_POSTED", module="finance", entity_type="supplier_payment", entity_id=str(payment.id), branch_id=invoice.branch_id))
-    db.commit()
-    return {"payment_id": payment.id, "invoice_id": invoice.id, "amount": str(payment.amount), "invoice_status": invoice.status}
-
-@app.get("/payroll", tags=["operations"])
-@app.get("/api/v1/hr/payroll", tags=["operations"])
-def get_payroll(db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.HR_STAFF, models.RoleType.ACCOUNTANT)
-    query = db.query(models.Payroll)
-    if current_user.roletype != models.RoleType.ADMIN:
-        allowed_employees = db.query(models.Employee.employeeid).filter(models.Employee.branchid == current_user.branchid)
-        query = query.filter(models.Payroll.employeeid.in_(allowed_employees))
-    records = query.order_by(models.Payroll.month.desc()).all()
-    return [{"payrollid": p.payrollid, "employeeid": p.employeeid, "employee_name": employee_name(db, p.employeeid), "month": p.month, "grosspay": float(p.grosspay), "deductions": float(p.deductions or 0), "netpay": float(p.netpay)} for p in records]
-
-@app.post("/payroll", tags=["operations"])
-@app.post("/api/v1/hr/payroll", tags=["operations"])
-def create_payroll(payload: schemas.PayrollCreate, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.HR_STAFF)
-    if payload.deductions > payload.grosspay: raise HTTPException(400, "Deductions cannot exceed gross pay")
-    record = models.Payroll(**payload.model_dump(), netpay=payload.grosspay - payload.deductions); db.add(record); db.commit(); db.refresh(record); return record
-
-@app.get("/sales", tags=["operations"])
-@app.get("/api/v1/sales", tags=["operations"])
-def get_sales(db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    if not auth.has_permission(db, current_user, "sales:view"):
-        raise HTTPException(status_code=403, detail="Sales view permission required.")
-    query = db.query(models.Sale).filter(models.Sale.status == "COMPLETED")
-    if current_user.roletype == models.RoleType.CASHIER:
-        query = query.filter(models.Sale.employeeid == current_user.employeeid)
-    elif current_user.roletype != models.RoleType.ADMIN:
-        query = query.filter(models.Sale.branchid == current_user.branchid)
-    sales = query.order_by(models.Sale.saledate.desc()).all()
-    result = []
-    for sale in sales:
-        customer = db.query(models.Customer).filter(models.Customer.customerid == sale.customerid).first() if sale.customerid else None
-        result.append({"saleid": sale.saleid, "saledate": sale.saledate, "totalamount": float(sale.totalamount or 0), "customer_name": customer.name if customer else "Walk-in", "cashier_name": employee_name(db, sale.employeeid), "branch_name": branch_name(db, sale.branchid), "items": [{"item_name": i.product.itemname if i.product else "Unknown product", "quantity": i.quantity, "unitpriceatsale": float(i.unitpriceatsale)} for i in sale.sale_items]})
-    return result
-
-@app.get("/cashier-sessions/current", tags=["operations"])
-@app.get("/api/v1/sales/cashier-sessions/current", tags=["operations"])
-def get_current_cashier_session(db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.CASHIER)
-    session = db.query(models.ERPCashierSession).filter_by(employeeid=current_user.employeeid, status="OPEN").order_by(models.ERPCashierSession.opened_at.desc()).first()
-    return {"session_id": session.id, "branch_id": session.branch_id, "opening_float": str(session.opening_float), "status": session.status, "opened_at": session.opened_at} if session else None
-
-@app.post("/cashier-sessions/open", tags=["operations"])
-@app.post("/api/v1/sales/cashier-sessions/open", tags=["operations"])
-def open_cashier_session(payload: schemas.CashierSessionOpen, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.CASHIER)
-    if not current_user.branchid:
-        raise HTTPException(403, "Your account is not assigned to a branch")
-    active = db.query(models.ERPCashierSession).filter_by(employeeid=current_user.employeeid, status="OPEN").with_for_update().first()
-    if active:
-        return {"session_id": active.id, "status": active.status, "opening_float": str(active.opening_float)}
-    session = models.ERPCashierSession(employeeid=current_user.employeeid, branch_id=current_user.branchid, opening_float=payload.opening_float)
-    db.add(session); db.flush()
-    db.add(models.ERPAuditLog(user_id=current_user.employeeid, action="CASHIER_SESSION_OPENED", module="sales", entity_type="cashier_session", entity_id=str(session.id), branch_id=current_user.branchid))
-    db.commit()
-    return {"session_id": session.id, "status": session.status, "opening_float": str(session.opening_float)}
-
-@app.post("/sales", tags=["operations"])
-@app.post("/api/v1/sales", tags=["operations"])
-def create_sale(payload: schemas.SaleCreate, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user), idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=120)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.CASHIER)
-    if not payload.items: raise HTTPException(400, "At least one sale item is required")
-    if not current_user.branchid:
-        raise HTTPException(403, "Your account is not assigned to a branch")
-    existing = db.query(models.Sale).filter(models.Sale.idempotency_key == idempotency_key).first()
-    if existing:
-        return {"saleid": existing.saleid, "totalamount": str(existing.totalamount), "status": existing.status, "idempotent_replay": True}
-    cashier_session = db.query(models.ERPCashierSession).filter_by(employeeid=current_user.employeeid, branch_id=current_user.branchid, status="OPEN").with_for_update().first()
-    if not cashier_session:
-        raise HTTPException(409, "Open a cashier session before completing a sale")
-    quantities = {}
-    for line in payload.items:
-        quantities[line.itemid] = quantities.get(line.itemid, Decimal("0")) + line.quantity
-    customerid = payload.customerid
-    if not customerid and (payload.customername or payload.customerphone):
-        customer = models.Customer(name=payload.customername, phone=payload.customerphone); db.add(customer); db.flush(); customerid = customer.customerid
-    sale = models.Sale(customerid=customerid, employeeid=current_user.employeeid, branchid=current_user.branchid, totalamount=0, status="COMPLETED", idempotency_key=idempotency_key); db.add(sale); db.flush()
-    total = Decimal("0")
-    cogs = Decimal("0")
-    for itemid, quantity in quantities.items():
-        product = db.query(models.Product).filter(models.Product.itemid == itemid).with_for_update().first()
-        if not product: raise HTTPException(400, f"Product {itemid} was not found")
-        if not product.is_active:
-            raise HTTPException(400, f"Product {product.itemname} is inactive")
-        balances = db.query(models.ERPStockBalance).filter_by(itemid=product.itemid, branch_id=current_user.branchid).filter(models.ERPStockBalance.quantity > 0).order_by(models.ERPStockBalance.id).with_for_update().all()
-        available = sum((balance.quantity for balance in balances), Decimal("0"))
-        if available < quantity:
-            raise HTTPException(409, f"Insufficient stock for {product.itemname}")
-        remaining = quantity
-        for balance in balances:
-            moved = min(balance.quantity, remaining)
-            if moved <= 0:
-                break
-            balance.quantity -= moved
-            db.add(models.ERPInventoryMovement(itemid=product.itemid, branch_id=current_user.branchid, warehouse_id=balance.warehouse_id, movement_type="SALE_OUT", quantity=moved, reference_type="SALE", reference_id=sale.saleid, created_by=current_user.employeeid))
-            remaining -= moved
-        total += product.unitprice * quantity
-        supply = db.query(models.Supply).filter_by(itemid=product.itemid).order_by(models.Supply.costprice).first()
-        if supply:
-            cogs += supply.costprice * quantity
-        db.add(models.SaleItem(saleid=sale.saleid, itemid=product.itemid, quantity=quantity, unitpriceatsale=product.unitprice))
-    total = total.quantize(Decimal("0.01"))
-    cogs = cogs.quantize(Decimal("0.01"))
-    sale.totalamount = total
-    db.add(models.ERPPayment(saleid=sale.saleid, branch_id=current_user.branchid, cashier_session_id=cashier_session.id, method=payload.payment_method.lower(), amount=total))
-    journal = models.ERPJournalEntry(reference_type="SALE", reference_id=sale.saleid, branch_id=current_user.branchid, created_by=current_user.employeeid)
-    db.add(journal); db.flush()
-    payment_account = {"cash": ("1000", "Cash on Hand"), "card": ("1010", "Card Clearing"), "mobile_money": ("1020", "Mobile Money")}[payload.payment_method]
-    db.add_all([
-        models.ERPJournalLine(journal_id=journal.id, account_code=payment_account[0], account_name=payment_account[1], debit=total, credit=0),
-        models.ERPJournalLine(journal_id=journal.id, account_code="4000", account_name="Sales Revenue", debit=0, credit=total),
-    ])
-    if cogs:
-        db.add_all([
-            models.ERPJournalLine(journal_id=journal.id, account_code="5000", account_name="Cost of Goods Sold", debit=cogs, credit=0),
-            models.ERPJournalLine(journal_id=journal.id, account_code="1200", account_name="Inventory Asset", debit=0, credit=cogs),
-        ])
-    db.add(models.LedgerEntry(sourcetype=models.LedgerSourceType.SALE, saleid=sale.saleid, amount=total, recordedby=current_user.employeeid))
-    db.add(models.ERPAuditLog(user_id=current_user.employeeid, action="SALE_COMPLETED", module="sales", entity_type="sale", entity_id=str(sale.saleid), branch_id=current_user.branchid, details_json=f'{{"total":"{total}","cogs":"{cogs}"}}'))
-    db.commit(); db.refresh(sale)
-    return {"saleid": sale.saleid, "totalamount": str(total), "cogs": str(cogs), "gross_profit": str(total - cogs), "status": sale.status}
-
-@app.get("/ledger", tags=["operations"])
-@app.get("/api/v1/finance/ledger", tags=["operations"])
-def get_ledger(db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.ACCOUNTANT, models.RoleType.BRANCH_MANAGER)
-    entries = db.query(models.LedgerEntry).order_by(models.LedgerEntry.entrydate.desc()).all()
-    return [{"entryid": e.entryid, "entrydate": e.entrydate, "sourcetype": e.sourcetype.value, "amount": float(e.amount), "source_label": f"Sale #{e.saleid}" if e.saleid else f"Payroll #{e.payrollid}", "accountant_name": employee_name(db, e.recordedby)} for e in entries]
-
-@app.post("/ledger", tags=["operations"])
-@app.post("/api/v1/finance/ledger", tags=["operations"])
-def create_ledger(payload: schemas.LedgerCreate, db: Session = Depends(get_db), current_user: models.Employee = Depends(auth.get_current_user)):
-    require_role(current_user, models.RoleType.ADMIN, models.RoleType.ACCOUNTANT)
-    entry = models.LedgerEntry(**payload.model_dump()); db.add(entry); db.commit(); db.refresh(entry); return entry
-
-
-app.mount("/swagger-ui", StaticFiles(directory=swagger_ui_dir), name="swagger-ui")
-app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
+        app.run(host='127.0.0.1', port=int(os.getenv('APP_PORT', '8000')), debug=False)
