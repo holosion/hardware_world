@@ -112,3 +112,23 @@ Flask reads prices from MySQL. Each sale item keeps its historical price, so cha
 8. Open `permissions.py`, `products()`, and the product template to explain the access check.
 
 Practise changing a product name and explaining its SQL query. Understanding a small flow is more useful than memorizing the codebase.
+
+## Demonstrating backup and recovery
+
+1. As Admin, open CSV backups and create a snapshot.
+2. Open products.csv in the backup folder to show the column headers and rows.
+3. Explain that each table has its own CSV, including employee accounts with hashed passwords.
+4. Run the README restore command with a separate empty database name.
+5. In Workbench, compare products and sales in the original and restored databases.
+
+**Why one CSV per table?** Tables have different columns and relationships. Separate files preserve their structure.
+
+**What does the manifest do?** It records the snapshot version, row counts, and SHA-256 checksums to detect damaged files. It is not encryption or a cryptographic signature.
+
+**Why a consistent snapshot?** It prevents mixing product stock from one moment with sales from another moment while employees are working.
+
+**Is restore a transaction?** Yes. All seven tables are inserted and committed together. A broken foreign key rolls back the entire restore. Existing records are never overwritten.
+
+**Why back up after commit?** A rolled-back sale must not become part of the backup. If the disk is full after a successful sale, the sale stays saved and the user is told to retry backup.
+
+**Can Sales download employee passwords?** No. Only Admins can download backups, and employee CSVs store password hashes rather than plain passwords.

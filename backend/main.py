@@ -3,13 +3,16 @@ import os
 import re
 import secrets
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from urllib.parse import urlsplit
 
 import click
 import pymysql
-from flask import Flask, abort, flash, g, redirect, render_template, request, session, url_for
+from flask import Flask, abort, flash, g, redirect, render_template, request, send_file, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from db import ROOT, close_db, connection_settings, execute, get_db, initialize, query, username_from_name
+from db import ROOT, close_db, commit, connect, connection_settings, execute, get_db, initialize, query, username_from_name
+from backup import TABLES, backup_folder, create_backup, list_backups, load_backup, restore_backup, zip_backup
 from permissions import ROLES, allowed
 
 
@@ -58,6 +61,8 @@ def create_app(test_config=None):
                       SESSION_COOKIE_SECURE=os.getenv('COOKIE_SECURE', 'false').lower() == 'true')
     if test_config:
         app.config.update(test_config)
+    app.config.setdefault('AUTO_BACKUP', not app.testing)
+    app.config.setdefault('BACKUP_DIR', os.getenv('CSV_BACKUP_DIR') or str(ROOT / 'backend' / 'backups'))
     app.teardown_appcontext(close_db)
     app.jinja_env.filters['money'] = lambda value: f'{value or 0:,.2f}'
 
@@ -87,6 +92,25 @@ def create_app(test_config=None):
     def can_access(endpoint, method='GET'):
         return bool(getattr(g, 'user', None) and allowed(g.user['role'], endpoint, method))
 
+    @app.after_request
+    def backup_changes_and_secure_response(response):
+        if getattr(g, 'committed_change', False) and response.status_code < 400 and app.config['AUTO_BACKUP']:
+            try:
+                create_backup(app.config['MYSQL'], app.config['BACKUP_DIR'])
+            except (OSError, ValueError, pymysql.MySQLError) as error:
+                # A disk/backup error must not undo or disguise a committed sale.
+                app.logger.error('Automatic CSV backup failed: %s', type(error).__name__)
+                flash('Your changes were saved, but the CSV backup failed. Ask an Admin to retry on the Backups page.', 'error')
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'DENY'
+        response.headers['Referrer-Policy'] = 'same-origin'
+        response.headers['Content-Security-Policy'] = (
+            "default-src 'self'; script-src 'none'; style-src 'self'; "
+            "img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'self'")
+        if request.endpoint != 'static':
+            response.headers['Cache-Control'] = 'no-store'
+        return response
+
     @app.context_processor
     def shared_template_values():
         return {'user': getattr(g, 'user', None), 'currency': os.getenv('CURRENCY', 'UGX'),
@@ -100,6 +124,8 @@ def create_app(test_config=None):
 
     @app.errorhandler(pymysql.MySQLError)
     def database_error(error):
+        if 'db' in g:
+            get_db().rollback()
         app.logger.error('MySQL request failed (error code %s)', error.args[0] if error.args else 'unknown')
         return render_template('error.html', title='Database unavailable',
                                message='Check that MySQL is running and that the simplified database has been initialized. See the README setup instructions.'), 503
@@ -161,7 +187,7 @@ def create_app(test_config=None):
                 execute('UPDATE categories SET name=%s WHERE id=%s', (name, int(record_id)))
             else:
                 execute('INSERT INTO categories (name) VALUES (%s)', (name,))
-            get_db().commit()
+            commit()
             flash('Category saved.', 'success')
             return redirect(url_for('categories'))
         editing = query('SELECT * FROM categories WHERE id=%s', (request.args.get('edit'),), one=True) if request.args.get('edit') else None
@@ -172,7 +198,7 @@ def create_app(test_config=None):
     @app.post('/categories/<int:record_id>/delete')
     def delete_category(record_id):
         execute('DELETE FROM categories WHERE id=%s', (record_id,))
-        get_db().commit()
+        commit()
         flash('Category deleted.', 'success')
         return redirect(url_for('categories'))
 
@@ -186,7 +212,7 @@ def create_app(test_config=None):
                 execute('UPDATE suppliers SET name=%s, phone=%s, email=%s WHERE id=%s', values + (integer('id', 1),))
             else:
                 execute('INSERT INTO suppliers (name,phone,email) VALUES (%s,%s,%s)', values)
-            get_db().commit()
+            commit()
             flash('Supplier saved.', 'success')
             return redirect(url_for('suppliers'))
         editing = query('SELECT * FROM suppliers WHERE id=%s', (request.args.get('edit'),), one=True) if request.args.get('edit') else None
@@ -195,7 +221,7 @@ def create_app(test_config=None):
     @app.post('/suppliers/<int:record_id>/delete')
     def delete_supplier(record_id):
         execute('DELETE FROM suppliers WHERE id=%s', (record_id,))
-        get_db().commit()
+        commit()
         flash('Supplier deleted.', 'success')
         return redirect(url_for('suppliers'))
 
@@ -209,7 +235,7 @@ def create_app(test_config=None):
             else:
                 execute('INSERT INTO products (name,category_id,price,reorder_level,stock) VALUES (%s,%s,%s,%s,%s)',
                         values + (integer('stock'),))
-            get_db().commit()
+            commit()
             flash('Product saved.', 'success')
             return redirect(url_for('products'))
         search = request.args.get('q', '').strip()
@@ -222,7 +248,7 @@ def create_app(test_config=None):
     @app.post('/products/<int:record_id>/delete')
     def delete_product(record_id):
         execute('DELETE FROM products WHERE id=%s', (record_id,))
-        get_db().commit()
+        commit()
         flash('Product deleted.', 'success')
         return redirect(url_for('products'))
 
@@ -257,7 +283,7 @@ def create_app(test_config=None):
                 execute('INSERT INTO sale_items (sale_id,product_id,quantity,unit_price) VALUES (%s,%s,%s,%s)',
                         (sale_id, product_id, quantity, product['price']))
                 execute('UPDATE products SET stock=stock-%s WHERE id=%s', (quantity, product_id))
-            get_db().commit()
+            commit()
             flash(f'Sale #{sale_id} saved. Stock has been reduced.', 'success')
             return redirect(url_for('receipt', sale_id=sale_id))
         rows = query('SELECT s.*, e.name AS employee, SUM(si.quantity*si.unit_price) AS total '
@@ -288,7 +314,7 @@ def create_app(test_config=None):
             execute('INSERT INTO purchases (supplier_id,product_id,employee_id,quantity,unit_cost) VALUES (%s,%s,%s,%s,%s)',
                     (supplier_id, product_id, g.user['id'], quantity, unit_cost))
             execute('UPDATE products SET stock=stock+%s WHERE id=%s', (quantity, product_id))
-            get_db().commit()
+            commit()
             flash('Purchase received. Stock has been increased.', 'success')
             return redirect(url_for('purchases'))
         rows = query('SELECT pu.*, p.name AS product, s.name AS supplier, e.name AS employee, '
@@ -325,7 +351,7 @@ def create_app(test_config=None):
                     raise ValueError('A password is required for a new employee.')
                 execute('INSERT INTO employees (name,username,email,role,password_hash) VALUES (%s,%s,%s,%s,%s)',
                         (name, username, email, role, generate_password_hash(password)))
-            get_db().commit()
+            commit()
             flash('Employee saved.', 'success')
             return redirect(url_for('employees'))
         editing = query('SELECT id,name,username,email,role FROM employees WHERE id=%s', (request.args.get('edit'),), one=True) if request.args.get('edit') else None
@@ -337,7 +363,7 @@ def create_app(test_config=None):
         if record_id == g.user['id']:
             raise ValueError('You cannot deactivate your own account.')
         execute('UPDATE employees SET active=NOT active WHERE id=%s', (record_id,))
-        get_db().commit()
+        commit()
         flash('Employee status updated.', 'success')
         return redirect(url_for('employees'))
 
@@ -351,10 +377,80 @@ def create_app(test_config=None):
             if len(password) < 8 or password != request.form.get('confirm_password'):
                 raise ValueError('Use at least eight characters and make sure the new passwords match.')
             execute('UPDATE employees SET password_hash=%s WHERE id=%s', (generate_password_hash(password), g.user['id']))
-            get_db().commit()
+            commit()
             flash('Password changed.', 'success')
             return redirect(url_for('settings'))
         return render_template('settings.html', title='My account')
+
+    @app.get('/backups.html')
+    def backups():
+        return render_template('backups.html', title='CSV backups', tables=TABLES,
+                               snapshots=list_backups(app.config['BACKUP_DIR'])[:10],
+                               backup_location=str(Path(app.config['BACKUP_DIR']).resolve()))
+
+    @app.post('/backups/create')
+    def create_snapshot():
+        try:
+            folder = create_backup(app.config['MYSQL'], app.config['BACKUP_DIR'])
+        except OSError:
+            flash('Could not write the backup. Check available disk space and folder permissions.', 'error')
+            return redirect(url_for('backups'))
+        flash('CSV backup created: ' + folder.name, 'success')
+        return redirect(url_for('backups'))
+
+    @app.get('/backups/<name>/download')
+    def download_backup(name):
+        folder = backup_folder(app.config['BACKUP_DIR'], name)
+        return send_file(zip_backup(folder), mimetype='application/zip', as_attachment=True,
+                         download_name=name + '.zip', max_age=0)
+
+    @app.get('/backups/<name>/<table>.csv')
+    def download_csv(name, table):
+        if table not in TABLES:
+            abort(404)
+        folder = backup_folder(app.config['BACKUP_DIR'], name)
+        load_backup(folder)
+        return send_file(folder / (table + '.csv'), mimetype='text/csv', as_attachment=True,
+                         download_name=table + '.csv', max_age=0)
+
+    @app.cli.command('create-backup')
+    def create_backup_command():
+        """Save seven CSV files and a checksum manifest on this computer."""
+        folder = create_backup(app.config['MYSQL'], app.config['BACKUP_DIR'])
+        click.echo('CSV backup saved to: ' + str(folder))
+
+    @app.cli.command('restore-backup')
+    @click.argument('folder', type=click.Path(exists=True, file_okay=False, path_type=Path))
+    @click.option('--database', required=True, help='A separate empty MySQL database to restore into.')
+    def restore_backup_command(folder, database):
+        """Restore all seven CSV files together, without overwriting existing data."""
+        original = urlsplit(os.getenv('DATABASE_URL', '')).path.strip('/')
+        if database.lower() in (app.config['MYSQL']['database'].lower(), original.lower()):
+            raise click.ClickException('Choose a separate empty database; the working databases are protected.')
+        try:
+            load_backup(folder)
+            target = dict(app.config['MYSQL'], database=database)
+            if not re.fullmatch(r'[A-Za-z0-9_]+', database):
+                raise ValueError('Use only letters, numbers and underscores in the database name.')
+            try:
+                with connect(target) as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute('SHOW TABLES')
+                        existing = {next(iter(row.values())) for row in cursor.fetchall()}
+                if existing and existing != set(TABLES):
+                    raise ValueError('The destination contains unrelated tables. Choose a new empty database.')
+                if not existing:
+                    initialize(target)
+            except pymysql.OperationalError as error:
+                if error.args[0] != 1049:
+                    raise
+                initialize(target)
+            counts = restore_backup(folder, target)
+        except ValueError as error:
+            raise click.ClickException(str(error)) from error
+        except pymysql.MySQLError as error:
+            raise click.ClickException('Restore failed. No rows were committed. Check database permissions, relationships, and constraints.') from error
+        click.echo(f'Restored {sum(counts.values())} rows into {database}. The working database is unchanged.')
 
     @app.cli.command('init-db')
     def init_db_command():
@@ -369,7 +465,7 @@ def create_app(test_config=None):
                 raise click.ClickException('Use an ADMIN_PASSWORD of at least eight characters and a valid ADMIN_EMAIL if provided.')
             execute('INSERT INTO employees (name,username,email,password_hash,role) VALUES (%s,%s,%s,%s,%s)',
                     (name, username, email, generate_password_hash(password), 'Admin'))
-            get_db().commit()
+            commit()
         click.echo('Simplified MySQL database ready: ' + app.config['MYSQL']['database'])
         admin = query("SELECT username FROM employees WHERE role='Admin' AND active=1 ORDER BY id LIMIT 1", one=True)
         click.echo('Sign in with department Admin and username: ' + admin['username'])

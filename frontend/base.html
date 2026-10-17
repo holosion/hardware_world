@@ -35,6 +35,10 @@
                  href="{{ url_for('employees') }}">
                 <span aria-hidden="true">○</span>Employees</a>
             {% endif %}
+            {% if can_access("backups") %}
+              <a class="nav-link {{ 'active' if request.endpoint == 'backups' else '' }}"
+                 href="{{ url_for('backups') }}"><span aria-hidden="true">↓</span>CSV backups</a>
+            {% endif %}
             <a class="nav-link {{ 'active' if request.endpoint == 'settings' else '' }}"
                href="{{ url_for('settings') }}">
               <span aria-hidden="true">○</span>My account</a>

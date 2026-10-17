@@ -56,6 +56,12 @@ def execute(sql, params=()):
         return cursor.lastrowid
 
 
+def commit():
+    """Commit all changes together, then request an automatic CSV snapshot."""
+    get_db().commit()
+    g.committed_change = True
+
+
 def initialize(settings):
     name = settings['database']
     if not re.fullmatch(r'[A-Za-z0-9_]+', name):

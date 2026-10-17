@@ -11,7 +11,7 @@ The `akena2` version uses **HTML, CSS, Flask, and MySQL**. It preserves the side
 - Dashboard totals, recent sales, and low-stock alerts.
 - Admins have full access. Sales and Purchasing employees have access to their department's work.
 
-Payroll, ledger, departments, branches, warehouses, approvals, credit accounts, automatic backups, and advanced permissions are outside this version.
+Payroll, ledger, departments, branches, warehouses, approvals, credit accounts, and advanced permissions are outside this version.
 
 ## Run on Windows
 
@@ -92,6 +92,7 @@ Sales and stock changes commit together or roll back together. Row locks prevent
 | backend/main.py | Flask routes, forms, login, business logic |
 | backend/db.py | MySQL connection and SQL helpers |
 | backend/permissions.py | Role access table shared by routes and templates |
+| backend/backup.py | Consistent CSV export, validation, and transactional restore |
 | backend/schema.sql | Seven tables and foreign keys |
 | backend/requirements.txt | Three direct dependencies |
 | backend/test_app.py | Integration tests using temporary MySQL schema |
@@ -112,6 +113,7 @@ Sales and stock changes commit together or roll back together. Row locks prevent
 | Record sales, view sales history and receipts | Yes | Yes | No |
 | Sales totals and recent sales on dashboard | Yes | Yes | No |
 | Manage employees, roles, and account status | Yes | No | No |
+| Create/download CSV backups | Yes | No | No |
 
 Sign in as an Admin, open **Employees**, and choose **Sales** or **Purchasing** when creating or editing an employee. The Admin assigns a unique username and password. The employee selects their department and signs in with that username and password. The selected department must match the saved role; it never changes the employee's permissions. One role is stored directly on each employee, so no additional department or permission tables are needed.
 
@@ -132,6 +134,46 @@ Existing administrator usernames are derived from `ADMIN_USERNAME` if set, other
 5. The employee can change their own password under **My account**.
 
 There is no public sign-up. Only Admins can create, edit, activate, or deactivate employee accounts. Usernames contain 3-50 letters/numbers/dots/underscores/hyphens, start with a letter or number, and are stored in lowercase. Passwords are stored as hashes in `employees.password_hash`, never as plain text. All credentials are checked against the MySQL `employees` table.
+
+## CSV backups and restore
+
+Sign in as Admin and open **CSV backups** in the sidebar. The page shows the backup location and lets you create a backup, download a ZIP of the complete snapshot, or download individual CSV files.
+
+By default, files are saved under `backend/backups/backup-YYYYMMDD-HHMMSS-xxxxxxxx/`. Every snapshot has `employees.csv`, `categories.csv`, `suppliers.csv`, `products.csv`, `sales.csv`, `sale_items.csv`, `purchases.csv`, and `manifest.json`. Snapshot names and timestamps use Nairobi time. The folder is excluded from Git. Keep backups private: employees.csv includes password hashes, not plain passwords. CSV files use UTF-8, a header row, and `\N` for NULL; a leading backslash escapes literal backslashes and formula-like text.
+
+Successful application saves automatically create a snapshot **after** the database commit. Reads, sign-ins, and failed transactions do not create snapshots. If backup writing fails, the database change stays saved and the user sees a warning. Retry from the Backups page. Changes made directly in Workbench or standalone scripts require a manual backup. All snapshots are retained on disk; the page lists the latest ten.
+
+Create a backup from the project folder:
+
+```powershell
+backend/.venv/Scripts/python.exe backend/main.py create-backup
+```
+
+To load CSV data back into MySQL, keep all seven CSV files and the manifest together, unchanged. Unzip a downloaded ZIP first, then run:
+
+```powershell
+backend/.venv/Scripts/python.exe backend/main.py restore-backup "backend/backups/backup-YYYYMMDD-HHMMSS-xxxxxxxx" --database hardware_world_restored
+```
+
+Replace the example folder name with the actual backup folder. The command creates the separate destination schema if necessary and refuses to overwrite any records, use the working/original schema, or load into a schema with unrelated tables. Your MySQL user needs permission to create that separate database. The restore keeps IDs and password hashes, checks headers/checksums/row counts, and inserts parent tables before children with foreign keys enabled. All inserts commit together; an error rolls the entire restore back. Restores support snapshots up to 64 MB. Checksums detect damaged files; they are not signatures or encryption, so restore only trusted backups.
+
+In Workbench, refresh Schemas and inspect the restored copy:
+
+```sql
+USE hardware_world_restored;
+SHOW TABLES;
+SELECT * FROM products;
+```
+
+Use the restore command for these backups rather than importing unrelated individual tables: it handles NULL values, escaping, table order, and relationships consistently. To run the app against the restored copy later, set `SIMPLE_DB_NAME=hardware_world_restored` in the root `.env` and restart Flask.
+
+## Transactions and security
+
+A sale inserts its header and items and deducts stock in **one transaction**. A purchase inserts its receipt and increases stock in **one transaction**. Validation failures or database errors roll back all of those changes. Product row locks serialize competing stock changes, and the database uses InnoDB, foreign keys, and nonnegative stock constraints. CSV export reads all seven tables from one consistent, read-only MySQL snapshot.
+
+The app checks department permissions on every route and method, uses parameterized SQL, hashed passwords, signed HttpOnly/SameSite session cookies, and CSRF tokens on every POST form. Downloads are Admin-only and backup names/table names are restricted. Responses disable caching of account/data pages and add frame, content-type, and content security headers. This remains a local demonstration app; the short admin/sales passwords explicitly requested for the demo have been preserved.
+
+The old Node/Tailwind dependencies and migration cache folders are no longer used and have been removed. The runtime requires the Python environment, HTML templates, CSS, and MySQL.
 
 ## Tests
 

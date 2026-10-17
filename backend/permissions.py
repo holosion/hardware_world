@@ -18,7 +18,9 @@ PURCHASING = {
 
 ROLE_ACCESS = {
     'Admin': {**COMMON, **SALES, **PURCHASING,
-              'employees': WRITE, 'toggle_employee': ('POST',)},
+              'employees': WRITE, 'toggle_employee': ('POST',),
+              'backups': READ, 'create_snapshot': ('POST',),
+              'download_backup': READ, 'download_csv': READ},
     'Sales': {**COMMON, **SALES},
     'Purchasing': {**COMMON, **PURCHASING},
 }

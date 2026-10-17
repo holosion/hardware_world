@@ -1,9 +1,15 @@
 """Real Flask/MySQL integration tests in a disposable, isolated schema."""
 import re
+import csv
+import hashlib
+import io
+import json
+import tempfile
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import patch
 
 from werkzeug.security import generate_password_hash
@@ -410,6 +416,163 @@ class StoreTests(unittest.TestCase):
                 after = {table: query(f'SELECT COUNT(*) AS n FROM {table}', one=True)['n'] for table in before}
                 self.assertEqual(before, after)
         self.assertEqual(self.read('SELECT stock FROM products WHERE id=%s', (self.product,))['stock'], 10)
+
+    def test_backup_restore_round_trip_and_atomic_failure(self):
+        import pymysql
+        from backup import TABLES, create_backup, load_backup, restore_backup
+        self.post('/purchase-orders.html', {'product_id': self.product, 'supplier_id': self.supplier,
+                                           'quantity': '2', 'unit_cost': '12.00'})
+        self.post('/sales.html', {'product_id': self.product, 'quantity': '3'})
+        with self.app.app_context():
+            execute('INSERT INTO categories (name) VALUES (%s)', ('=formula, "quote"\nNairobi \u2713',))
+            execute('UPDATE employees SET email=NULL WHERE id=%s', (self.staff,))
+            execute('UPDATE suppliers SET phone=%s WHERE id=%s', ('\\N', self.supplier))
+            get_db().commit()
+        target = dict(self.mysql, database='hw_test_' + uuid.uuid4().hex[:12])
+        initialize(target)
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                folder = create_backup(self.mysql, temporary)
+                expected = load_backup(folder)
+                counts = restore_backup(folder, target)
+                self.assertEqual(counts['sales'], 1)
+                restored = create_backup(target, temporary)
+                self.assertEqual(load_backup(restored), expected)
+                with self.assertRaisesRegex(ValueError, 'empty database'):
+                    restore_backup(folder, target)
+                with connect(target) as connection:
+                    with connection.cursor() as cursor:
+                        for table in reversed(TABLES):
+                            cursor.execute(f'DELETE FROM {table}')
+                    connection.commit()
+                # Even with a recomputed checksum, a broken FK rolls back ALL tables.
+                path = folder / 'sale_items.csv'
+                with path.open(encoding='utf-8', newline='') as handle:
+                    rows = list(csv.reader(handle))
+                rows[1][2] = '999999'
+                with path.open('w', encoding='utf-8', newline='') as handle:
+                    csv.writer(handle).writerows(rows)
+                manifest_path = folder / 'manifest.json'
+                manifest = json.loads(manifest_path.read_text())
+                manifest['tables']['sale_items']['sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+                manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+                with self.assertRaises(pymysql.IntegrityError):
+                    restore_backup(folder, target)
+                with connect(target) as connection:
+                    with connection.cursor() as cursor:
+                        for table in TABLES:
+                            cursor.execute(f'SELECT COUNT(*) AS n FROM {table}')
+                            self.assertEqual(cursor.fetchone()['n'], 0)
+                path.write_text('corrupted file', encoding='utf-8')
+                with self.assertRaisesRegex(ValueError, 'checksum'):
+                    restore_backup(folder, target)
+        finally:
+            assert re.fullmatch(r'hw_test_[a-f0-9]{12}', target['database'])
+            with connect(target) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(f'DROP DATABASE `{target["database"]}`')
+
+    def test_backup_page_downloads_are_admin_only_and_paths_are_restricted(self):
+        import zipfile
+        from backup import create_backup
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(self.app.config, {'BACKUP_DIR': temporary}):
+            folder = create_backup(self.mysql, temporary)
+            self.assertEqual(self.client.get('/backups.html').status_code, 200)
+            with self.client.get(f'/backups/{folder.name}/products.csv') as response:
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.data.startswith(b'id,name,category_id'))
+                self.assertEqual(response.headers['Cache-Control'], 'no-store')
+            with self.client.get(f'/backups/{folder.name}/download') as response:
+                with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+                    self.assertIn('products.csv', archive.namelist())
+                    self.assertIn('manifest.json', archive.namelist())
+                    self.assertEqual(len(archive.namelist()), 8)
+            self.assertEqual(self.client.get(f'/backups/{folder.name}/secret.csv').status_code, 404)
+            self.assertEqual(self.client.get('/backups/invalid/products.csv').status_code, 400)
+            self.login('staff')
+            for path in ('/backups.html', f'/backups/{folder.name}/products.csv', f'/backups/{folder.name}/download'):
+                self.assertEqual(self.client.get(path).status_code, 403)
+            self.assertEqual(self.post('/backups/create').status_code, 403)
+            self.post('/logout')
+            self.assertEqual(self.client.get(f'/backups/{folder.name}/employees.csv').status_code, 302)
+
+    def test_automatic_backup_only_after_commit_and_failure_preserves_saved_sale(self):
+        with patch.dict(self.app.config, {'AUTO_BACKUP': True}), patch('main.create_backup') as snapshot:
+            self.client.get('/')
+            snapshot.assert_not_called()
+            self.post('/sales.html', {'product_id': self.product, 'quantity': '99999'})
+            snapshot.assert_not_called()
+            self.post('/sales.html', {'product_id': self.product, 'quantity': '2'})
+            snapshot.assert_called_once()
+        with patch.dict(self.app.config, {'AUTO_BACKUP': True}), patch('main.create_backup', side_effect=OSError('Disk full')):
+            response = self.post('/sales.html', {'product_id': self.product, 'quantity': '1'}, follow_redirects=True)
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b'CSV backup failed', response.data)
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM sales')['n'], 2)
+        self.assertEqual(self.read('SELECT stock FROM products WHERE id=%s', (self.product,))['stock'], 7)
+
+    def test_successful_sale_creates_real_csv_snapshot(self):
+        from backup import list_backups, load_backup
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(self.app.config, {'AUTO_BACKUP': True, 'BACKUP_DIR': temporary}):
+            response = self.post('/sales.html', {'product_id': self.product, 'quantity': '2'})
+            self.assertEqual(response.status_code, 302)
+            folders = list_backups(temporary)
+            self.assertEqual(len(folders), 1)
+            rows = load_backup(Path(temporary) / folders[0])
+            self.assertEqual(len(rows['sales']), 1)
+            product = next(row for row in rows['products'] if row[0] == str(self.product))
+            self.assertEqual(product[4], '8')
+            self.assertNotIn('test-password', (Path(temporary) / folders[0] / 'employees.csv').read_text())
+
+    def test_security_headers_and_purchase_failure_roll_back(self):
+        import pymysql
+        from db import execute as real_execute
+        response = self.client.get('/')
+        self.assertEqual(response.headers['X-Content-Type-Options'], 'nosniff')
+        self.assertEqual(response.headers['X-Frame-Options'], 'DENY')
+        self.assertIn("script-src 'none'", response.headers['Content-Security-Policy'])
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
+
+        def fail_stock_update(sql, params=()):
+            if sql.startswith('UPDATE products SET stock=stock+'):
+                raise pymysql.IntegrityError(3819, 'Simulated stock constraint failure')
+            return real_execute(sql, params)
+
+        with patch('main.execute', side_effect=fail_stock_update):
+            response = self.post('/purchase-orders.html', {'product_id': self.product,
+                                 'supplier_id': self.supplier, 'quantity': 5, 'unit_cost': '10.00'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM purchases')['n'], 0)
+        self.assertEqual(self.read('SELECT stock FROM products WHERE id=%s', (self.product,))['stock'], 10)
+
+    def test_restore_command_refuses_working_database(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self.app.test_cli_runner().invoke(args=['restore-backup', temporary,
+                                                           '--database', self.mysql['database']])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn('working databases are protected', result.output)
+
+    def test_restore_command_creates_a_separate_copy_and_refuses_to_overwrite_it(self):
+        from backup import create_backup
+        target = dict(self.mysql, database='hw_test_' + uuid.uuid4().hex[:12])
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                folder = create_backup(self.mysql, temporary)
+                args = ['restore-backup', str(folder), '--database', target['database']]
+                result = self.app.test_cli_runner().invoke(args=args)
+                self.assertEqual(result.exit_code, 0, result.output)
+                again = self.app.test_cli_runner().invoke(args=args)
+                self.assertNotEqual(again.exit_code, 0)
+                self.assertIn('empty database', again.output)
+                with connect(target) as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute('SELECT COUNT(*) AS n FROM employees')
+                        self.assertEqual(cursor.fetchone()['n'], 2)
+        finally:
+            assert re.fullmatch(r'hw_test_[a-f0-9]{12}', target['database'])
+            with connect(target) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(f'DROP DATABASE `{target["database"]}`')
 
 
 if __name__ == '__main__':
