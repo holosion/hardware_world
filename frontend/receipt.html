@@ -43,6 +43,7 @@
       </table>
     </div>
     <p class="muted">Thank you for shopping with Hardware World.</p>
+    <a class="button" href="{{ url_for('receipt_docx',sale_id=sale.id) }}">Download Word receipt</a>
     <a class="button secondary" href="{{ url_for('sales') }}">Back to sales</a>
   </section>
 {% endblock %}

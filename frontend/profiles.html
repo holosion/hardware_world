@@ -1,0 +1,14 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="panel"><h2>Assign employee details</h2><p>Access roles are managed on Employees. This form manages business job types and HR information. Enter the complete profile when saving.</p>
+<form method="post">{{ csrf() }}
+<label>Employee<select name="employee_id" required>{% for r in rows %}<option value="{{ r.id }}">{{ r.name }} ({{ r.job_type }})</option>{% endfor %}</select></label>
+<label>Job type<select name="job_type">{% for job in jobs %}<option>{{ job }}</option>{% endfor %}</select></label>
+<label>Department<select name="department_id"><option value="">Unassigned</option>{% for r in departments %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}</select></label>
+<label>Supervisor<select name="supervisor_id"><option value="">None</option>{% for r in rows %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}</select></label>
+<label>NIN<input name="nin" maxlength="30"></label><label>Phone<input name="phone" maxlength="30"></label>
+<label>Date hired<input name="date_hired" type="date"></label><label>Salary<input name="salary" type="number" min="0" step="0.01" value="0" required></label>
+<label>Job detail<input name="detail" required maxlength="100"></label><p class="muted">Enter a POS terminal for Cashier, a numeric approval limit for ProcurementOfficer, certification for Accountant, HR responsibility for HRStaff, or management level for BranchManager.</p>
+<label>Managed branch (BranchManager only)<select name="branch_id"><option value="">Unassigned</option>{% for r in branches %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}</select></label>
+<button class="button">Save profile</button></form></section>{% include 'record_table.html' %}
+{% endblock %}

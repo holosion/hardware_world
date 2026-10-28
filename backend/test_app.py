@@ -24,10 +24,13 @@ class StoreTests(unittest.TestCase):
         cls.mysql = connection_settings()
         cls.mysql['database'] = 'hw_test_' + uuid.uuid4().hex[:12]
         initialize(cls.mysql)
-        cls.app = create_app({'TESTING': True, 'SECRET_KEY': 'integration-test-key', 'MYSQL': cls.mysql})
+        cls.receipts = tempfile.TemporaryDirectory()
+        cls.app = create_app({'TESTING': True, 'SECRET_KEY': 'integration-test-key', 'MYSQL': cls.mysql,
+                             'RECEIPT_DIR': cls.receipts.name})
 
     @classmethod
     def tearDownClass(cls):
+        cls.receipts.cleanup()
         name = cls.mysql['database']
         assert re.fullmatch(r'hw_test_[a-f0-9]{12}', name)
         with connect(cls.mysql) as connection:
@@ -35,10 +38,16 @@ class StoreTests(unittest.TestCase):
                 cursor.execute(f'DROP DATABASE `{name}`')
 
     def setUp(self):
+        for receipt in Path(self.receipts.name).glob('sale-*.docx'):
+            receipt.unlink()
         self.client = self.app.test_client()
         with self.app.app_context():
-            for table in ('sale_items', 'sales', 'purchases', 'products', 'categories', 'suppliers', 'employees'):
+            from backup import TABLES
+            execute('SET @restoring_snapshot=1')
+            execute('UPDATE employees SET supervisor_id=NULL')
+            for table in reversed(TABLES):
                 execute(f'DELETE FROM {table}')
+            execute('SET @restoring_snapshot=0')
             self.admin = execute('INSERT INTO employees (name,username,email,password_hash,role) VALUES (%s,%s,%s,%s,%s)',
                                  ('Test Admin', 'admin', 'admin@example.test', generate_password_hash('test-password'), 'Admin'))
             self.staff = execute('INSERT INTO employees (name,username,email,password_hash,role) VALUES (%s,%s,%s,%s,%s)',
@@ -79,7 +88,86 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
         self.assertIn(b'<option selected>Sales</option>', self.client.get('/employees.html').data)
         with self.app.app_context():
-            self.assertEqual(len(query('SHOW TABLES')), 7)
+            self.assertEqual(len(query('SHOW TABLES')), 20)
+
+    def test_assignment_pages_and_entity_permissions(self):
+        for path in ('/staff-profiles.html','/payroll.html','/ledger.html','/data-quality.html','/orders.html',
+                     '/business/branches','/business/departments','/business/customers','/business/supply'):
+            self.assertEqual(self.client.get(path).status_code,200,path)
+        self.login('staff')
+        for path in ('/payroll.html','/staff-profiles.html','/ledger.html','/business/branches','/business/supply'):
+            self.assertEqual(self.client.get(path).status_code,403,path)
+        self.assertEqual(self.post('/business/customers',{'name':' Client ','phone':'0700000000'}).status_code,302)
+        self.assertEqual(self.read('SELECT name FROM customers')['name'],'Client')
+
+    def test_payroll_trigger_computed_net_and_duplicate_month(self):
+        data = {'employee_id':self.staff,'pay_month':'2026-10-01','gross_pay':'1000','deductions':'150'}
+        self.assertEqual(self.post('/payroll.html',data).status_code,302)
+        self.assertEqual(self.read('SELECT net_pay FROM payroll')['net_pay'],Decimal('850'))
+        self.assertEqual(self.read("SELECT amount FROM ledger_entries WHERE source_type='Payroll'")['amount'],Decimal('-850'))
+        self.assertEqual(self.post('/payroll.html',data).status_code,400)
+        self.assertEqual(self.post('/payroll.html',dict(data,pay_month='2026-11-01',deductions='1001')).status_code,400)
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM payroll')['n'],1)
+
+    def test_subtypes_and_recursive_supervision(self):
+        data = {'employee_id':self.staff,'job_type':'ProcurementOfficer','salary':'500','detail':'1000','supervisor_id':self.admin}
+        self.assertEqual(self.post('/staff-profiles.html',data).status_code,302)
+        self.assertEqual(self.read('SELECT approval_limit FROM procurement_officers WHERE employee_id=%s',(self.staff,))['approval_limit'],Decimal('1000'))
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM cashiers WHERE employee_id=%s',(self.staff,))['n'],0)
+        self.assertEqual(self.post('/staff-profiles.html',dict(data,employee_id=self.admin,supervisor_id=self.staff)).status_code,400)
+        self.assertIsNone(self.read('SELECT supervisor_id FROM employees WHERE id=%s',(self.admin,))['supervisor_id'])
+
+    def test_order_receiving_is_atomic_and_once_only(self):
+        data={'supplier_id':self.supplier,'product_id':self.product,'quantity':'4','unit_cost':'10'}
+        self.assertEqual(self.post('/orders.html',data).status_code,302)
+        order=self.read('SELECT id FROM purchase_orders')['id']
+        self.assertEqual(self.read('SELECT stock FROM products WHERE id=%s',(self.product,))['stock'],10)
+        self.assertEqual(self.post(f'/orders/{order}/receive').status_code,302)
+        self.assertEqual(self.post(f'/orders/{order}/receive').status_code,400)
+        self.assertEqual(self.read('SELECT stock FROM products WHERE id=%s',(self.product,))['stock'],14)
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM purchases')['n'],1)
+
+    def test_word_receipt_and_ledger_follow_committed_sale(self):
+        import zipfile
+        response=self.post('/sales.html',{'product_id':self.product,'quantity':'2'})
+        self.assertEqual(response.status_code,302)
+        sale=self.read('SELECT id FROM sales')['id']
+        self.assertEqual(self.read('SELECT amount FROM ledger_entries WHERE sale_id=%s',(sale,))['amount'],Decimal('41'))
+        self.assertTrue((Path(self.receipts.name)/f'sale-{sale}.docx').is_file())
+        with self.client.get(f'/sales/{sale}/receipt.docx') as response:
+            self.assertEqual(response.status_code,200)
+            with zipfile.ZipFile(io.BytesIO(response.data)) as z:
+                content=z.read('word/document.xml')
+                self.assertIn(b'41.00',content)
+                self.assertIn(b'Hammer',content)
+        self.post('/sales.html',{'product_id':self.second,'quantity':'3'})
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM ledger_entries')['n'],1)
+
+    def test_receipt_failure_does_not_undo_sale(self):
+        with patch('receipts.save_receipt',side_effect=OSError('disk full')):
+            response=self.post('/sales.html',{'product_id':self.product,'quantity':'1'},follow_redirects=True)
+        self.assertEqual(response.status_code,200)
+        self.assertIn(b'Word receipt could not be saved',response.data)
+        sale=self.read('SELECT id FROM sales')['id']
+        with self.client.get(f'/sales/{sale}/receipt.docx') as response:
+            self.assertEqual(response.status_code,200)
+
+    def test_assignment_backup_with_subtype_payroll_and_forward_supervisor(self):
+        from backup import create_backup,load_backup,restore_backup
+        self.post('/staff-profiles.html',{'employee_id':self.admin,'job_type':'Accountant','salary':'1000','detail':'CPA','supervisor_id':self.staff})
+        self.post('/payroll.html',{'employee_id':self.admin,'pay_month':'2026-10-01','gross_pay':'1000','deductions':'100'})
+        target=dict(self.mysql,database='hw_test_'+uuid.uuid4().hex[:12])
+        initialize(target)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                folder=create_backup(self.mysql,directory)
+                restore_backup(folder,target)
+                restored=create_backup(target,directory)
+                self.assertEqual(load_backup(folder),load_backup(restored))
+        finally:
+            with connect(target) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(f'DROP DATABASE `{target["database"]}`')
 
     def test_purchase_then_sale_updates_stock_receipt_and_dashboard(self):
         response = self.post('/purchase-orders.html', {'supplier_id': self.supplier,
@@ -442,6 +530,7 @@ class StoreTests(unittest.TestCase):
                     restore_backup(folder, target)
                 with connect(target) as connection:
                     with connection.cursor() as cursor:
+                        cursor.execute('SET @restoring_snapshot=1')
                         for table in reversed(TABLES):
                             cursor.execute(f'DELETE FROM {table}')
                     connection.commit()
@@ -486,7 +575,7 @@ class StoreTests(unittest.TestCase):
                 with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
                     self.assertIn('products.csv', archive.namelist())
                     self.assertIn('manifest.json', archive.namelist())
-                    self.assertEqual(len(archive.namelist()), 8)
+                    self.assertEqual(len(archive.namelist()), 21)
             self.assertEqual(self.client.get(f'/backups/{folder.name}/secret.csv').status_code, 404)
             self.assertEqual(self.client.get('/backups/invalid/products.csv').status_code, 400)
             self.login('staff')

@@ -1,4 +1,4 @@
--- Seven tables. Run through: python backend/main.py init-db
+-- Original seven tables; business_schema.sql adds the assignment entities. Run through: python backend/main.py init-db
 CREATE TABLE IF NOT EXISTS employees (
     id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(100) NOT NULL,

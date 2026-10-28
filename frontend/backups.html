@@ -18,7 +18,7 @@
         <p><a class="button secondary"
    href="{{ url_for('download_backup', name=snapshot) }}">Download complete backup (ZIP)</a></p>
         <p>Individual CSV files:</p>
-        {% for table in tables %}
+        {% for table in snapshot_tables[snapshot] %}
           <p><a href="{{ url_for('download_csv', name=snapshot, table=table) }}">{{ table }}.csv</a></p>
         {% endfor %}
       </article>
@@ -28,7 +28,7 @@
   </section>
   <section class="panel">
     <h2>Load a backup into MySQL</h2>
-    <p>Use the restore command in the README to load the complete snapshot into a separate empty database. It validates the CSV files, keeps foreign keys enabled, and commits all seven tables together.</p>
+    <p>Use the restore command in the README to load the complete snapshot into a separate empty database. It validates the CSV files, keeps foreign keys enabled, and commits all 20 tables together. Older seven-table snapshots are upgraded during restore.</p>
     <p class="muted">The restore command refuses to overwrite the working database. Unzip a downloaded backup before restoring it. Keep the CSV files and manifest.json together and unchanged.</p>
   </section>
 {% endblock %}

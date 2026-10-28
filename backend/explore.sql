@@ -7,7 +7,7 @@ USE hardware_world_simple;
 -- 1. Confirm the server and selected database.
 SELECT VERSION() AS mysql_version, DATABASE() AS database_name;
 
--- 2. See the seven project tables.
+-- 2. See all project tables.
 SHOW TABLES;
 
 -- 3. Employee accounts (password hashes are deliberately excluded).

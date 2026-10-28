@@ -29,6 +29,12 @@
                   <span aria-hidden="true">{{ symbol }}</span>{{ label }}</a>
               {% endif %}
             {% endfor %}
+            {% for endpoint,label in [('orders','Supplier orders'),('staff_profiles','Staff profiles'),('payroll','Payroll'),('ledger','Ledger'),('data_quality','Data quality')] %}
+            {% if can_access(endpoint) %}<a class="nav-link" href="{{ url_for(endpoint) }}">{{ label }}</a>{% endif %}
+            {% endfor %}
+            {% for entity,label in [('branches','Branches'),('departments','Departments'),('customers','Customers'),('supply','Supplier catalogue')] %}
+            {% if user.role == 'Admin' or (user.role == 'Sales' and entity == 'customers') or (user.role == 'Purchasing' and entity == 'supply') %}<a class="nav-link" href="{{ url_for('business_records',entity=entity) }}">{{ label }}</a>{% endif %}
+            {% endfor %}
             {% if can_access("employees") %}
               <p class="nav-label">MANAGEMENT</p>
               <a class="nav-link {{ 'active' if request.endpoint == 'employees' else '' }}"

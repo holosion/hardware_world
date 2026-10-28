@@ -1,0 +1,5 @@
+<section class="panel"><h2>Saved records</h2><div class="table-wrap"><table>
+{% if rows %}<thead><tr>{% for key in rows[0] %}<th>{{ key.replace('_',' ').title() }}</th>{% endfor %}</tr></thead><tbody>
+{% for row in rows %}<tr>{% for value in row.values() %}<td>{{ value if value is not none else '-' }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+{% else %}<tbody><tr><td>No records yet.</td></tr></tbody>{% endif %}
+</table></div></section>

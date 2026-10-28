@@ -1,0 +1,10 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="panel"><h2>Add record</h2><form method="post">{{ csrf() }}
+{% for field,kind in fields %}
+<label>{{ field.replace('_',' ').title() }}
+{% if kind in choices %}<select name="{{ field }}" required><option value="">Choose record</option>{% for row in choices[kind] %}<option value="{{ row.id }}">{{ row.name }}</option>{% endfor %}</select>
+{% else %}<input name="{{ field }}" type="{{ 'number' if kind in ('number','money') else 'text' }}" step="{{ '0.01' if kind == 'money' else '1' }}" min="0" maxlength="{{ 30 if field in ('phone','contact_number') else 150 if field == 'location' else 100 }}" required>{% endif %}</label>
+{% endfor %}<button class="button">Save record</button></form></section>
+{% include 'record_table.html' %}
+{% endblock %}

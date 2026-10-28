@@ -24,6 +24,10 @@ def generate_diagram():
                 'WHERE TABLE_SCHEMA=%s AND REFERENCED_TABLE_NAME IS NOT NULL '
                 'ORDER BY TABLE_NAME, COLUMN_NAME', (settings['database'],))
             foreign_keys = cursor.fetchall()
+            cursor.execute('SELECT TABLE_NAME,INDEX_NAME,GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS fields '
+                           'FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=%s AND NON_UNIQUE=0 '
+                           'GROUP BY TABLE_NAME,INDEX_NAME', (settings['database'],))
+            unique_single = {(row['TABLE_NAME'],row['fields']) for row in cursor.fetchall() if ',' not in row['fields']}
         connection.rollback()
     if not columns:
         raise ValueError('No database tables found. Run init-db first.')
@@ -59,7 +63,7 @@ def generate_diagram():
         child, field, parent = key['TABLE_NAME'], key['COLUMN_NAME'], key['REFERENCED_TABLE_NAME']
         column = next(c for c in tables[child] if c['COLUMN_NAME'] == field)
         parent_end = '|o' if column['IS_NULLABLE'] == 'YES' else '||'
-        child_end = 'o|' if column['COLUMN_KEY'] in ('PRI', 'UNI') else 'o{'
+        child_end = 'o|' if (child,field) in unique_single else 'o{'
         diagram.append(f'    {parent} {parent_end}--{child_end} {child} : {field}')
     text = (
         '# Hardware World - database diagram\n\n'

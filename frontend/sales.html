@@ -8,6 +8,8 @@
       <label class="customer-field">
         Customer name (optional)<input name="customer_name" maxlength="100" placeholder="Walk-in customer">
       </label>
+      <label>Registered customer (optional)<select name="customer_id"><option value="">Use entered name or walk-in</option>{% for r in customers %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}</select></label>
+      <label>Branch (optional for historical compatibility)<select name="branch_id"><option value="">Unassigned</option>{% for r in branches %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}</select></label>
       <div class="sale-lines">
         {% for index in range(3) %}
           <div class="sale-line">

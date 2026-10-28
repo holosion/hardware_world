@@ -25,6 +25,7 @@ def connection_settings():
         database=os.getenv('SIMPLE_DB_NAME', 'hardware_world_simple'),
         charset='utf8mb4', cursorclass=pymysql.cursors.DictCursor,
         autocommit=False,
+        init_command="SET time_zone = '+03:00'",
     )
 
 
@@ -83,6 +84,8 @@ def initialize(settings):
                     cursor.execute(statement)
             upgrade_roles(cursor)
             upgrade_usernames(cursor)
+            from business import upgrade
+            upgrade(cursor)
         connection.commit()
 
 

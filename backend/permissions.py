@@ -5,7 +5,7 @@ READ = ('GET',)
 WRITE = ('GET', 'POST')
 
 COMMON = {'dashboard': READ, 'products': READ, 'settings': WRITE}
-SALES = {'sales': WRITE, 'receipt': READ}
+SALES = {'sales': WRITE, 'receipt': READ, 'receipt_docx': READ, 'business_records': WRITE}
 PURCHASING = {
     'products': WRITE,
     'delete_product': ('POST',),
@@ -14,6 +14,7 @@ PURCHASING = {
     'suppliers': WRITE,
     'delete_supplier': ('POST',),
     'purchases': WRITE,
+    'orders': WRITE, 'receive_order': ('POST',), 'business_records': WRITE,
 }
 
 ROLE_ACCESS = {
@@ -24,6 +25,7 @@ ROLE_ACCESS = {
     'Sales': {**COMMON, **SALES},
     'Purchasing': {**COMMON, **PURCHASING},
 }
+ROLE_ACCESS['Admin'].update({'staff_profiles': WRITE, 'payroll': WRITE, 'ledger': READ, 'data_quality': READ})
 
 
 def allowed(role, endpoint, method='GET'):

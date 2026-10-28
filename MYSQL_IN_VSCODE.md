@@ -25,7 +25,7 @@ If the new profile is not visible yet, run **Developer: Reload Window** from Ctr
 
 ## Visualize the table relationships
 
-Open [DATABASE_DIAGRAM.md](DATABASE_DIAGRAM.md). This computer is configured to open it in **Markdown Preview**, displaying the seven tables as boxes joined by their foreign-key relationships. If the source appears, press **Ctrl+Shift+V**, or use **Reopen Editor With -> Markdown Preview**. VS Code's built-in Mermaid support renders it locally.
+Open [DATABASE_DIAGRAM.md](DATABASE_DIAGRAM.md). This computer is configured to open it in **Markdown Preview**, displaying all 20 tables as boxes joined by their foreign-key relationships. If the source appears, press **Ctrl+Shift+V**, or use **Reopen Editor With -> Markdown Preview**. VS Code's built-in Mermaid support renders it locally.
 
 Use the on-diagram zoom controls, or hold **Alt** and scroll to zoom; Alt-drag pans. PK means primary key, FK means foreign key, and UK means unique field.
 

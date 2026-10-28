@@ -63,6 +63,7 @@ def create_app(test_config=None):
         app.config.update(test_config)
     app.config.setdefault('AUTO_BACKUP', not app.testing)
     app.config.setdefault('BACKUP_DIR', os.getenv('CSV_BACKUP_DIR') or str(ROOT / 'backend' / 'backups'))
+    app.config.setdefault('RECEIPT_DIR', str(ROOT / 'backend' / 'receipts' / app.config['MYSQL']['database']))
     app.teardown_appcontext(close_db)
     app.jinja_env.filters['money'] = lambda value: f'{value or 0:,.2f}'
 
@@ -275,7 +276,13 @@ def create_app(test_config=None):
             customer = request.form.get('customer_name', '').strip() or 'Walk-in customer'
             if len(customer) > 100:
                 raise ValueError('Customer name is too long.')
-            sale_id = execute('INSERT INTO sales (employee_id,customer_name) VALUES (%s,%s)', (g.user['id'], customer))
+            customer_id = integer('customer_id',1) if request.form.get('customer_id') else None
+            branch_id = integer('branch_id',1) if request.form.get('branch_id') else None
+            if customer_id:
+                registered = query('SELECT name FROM customers WHERE id=%s',(customer_id,),one=True)
+                if not registered: raise ValueError('Choose an existing customer.')
+                customer = registered['name']
+            sale_id = execute('INSERT INTO sales (employee_id,customer_name,customer_id,branch_id) VALUES (%s,%s,%s,%s)', (g.user['id'], customer,customer_id,branch_id))
             for product_id, quantity in sorted(cart.items()):
                 product = query('SELECT * FROM products WHERE id=%s FOR UPDATE', (product_id,), one=True)
                 if not product or product['stock'] < quantity:
@@ -284,13 +291,30 @@ def create_app(test_config=None):
                         (sale_id, product_id, quantity, product['price']))
                 execute('UPDATE products SET stock=stock-%s WHERE id=%s', (quantity, product_id))
             commit()
+            try:
+                from receipts import save_receipt
+                save_receipt(sale_id, app.config['RECEIPT_DIR'])
+            except (OSError, ValueError) as error:
+                app.logger.error('Receipt write failed: %s', type(error).__name__)
+                flash('Sale saved. The Word receipt could not be saved to disk; retry its download from the receipt page.', 'error')
             flash(f'Sale #{sale_id} saved. Stock has been reduced.', 'success')
             return redirect(url_for('receipt', sale_id=sale_id))
         rows = query('SELECT s.*, e.name AS employee, SUM(si.quantity*si.unit_price) AS total '
                      'FROM sales s JOIN employees e ON e.id=s.employee_id JOIN sale_items si ON si.sale_id=s.id '
                      'GROUP BY s.id ORDER BY s.id DESC')
         return render_template('sales.html', title='Sales', rows=rows,
-                               products=query('SELECT * FROM products WHERE stock>0 ORDER BY name'))
+                               products=query('SELECT * FROM products WHERE stock>0 ORDER BY name'),
+                               customers=query('SELECT id,name FROM customers ORDER BY name'),
+                               branches=query('SELECT id,name FROM branches ORDER BY name'))
+
+    @app.get('/sales/<int:sale_id>/receipt.docx')
+    def receipt_docx(sale_id):
+        from receipts import receipt_bytes
+        if not query('SELECT id FROM sales WHERE id=%s',(sale_id,),one=True): abort(404)
+        saved = Path(app.config['RECEIPT_DIR']) / f'sale-{sale_id}.docx'
+        return send_file(saved if saved.is_file() else receipt_bytes(sale_id), as_attachment=True,
+                         download_name=f'Hardware_World_Receipt_{sale_id}.docx',
+                         mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
 
     @app.get('/sales/<int:sale_id>')
     def receipt(sale_id):
@@ -384,8 +408,10 @@ def create_app(test_config=None):
 
     @app.get('/backups.html')
     def backups():
+        snapshots = list_backups(app.config['BACKUP_DIR'])[:10]
         return render_template('backups.html', title='CSV backups', tables=TABLES,
-                               snapshots=list_backups(app.config['BACKUP_DIR'])[:10],
+                               snapshots=snapshots,
+                               snapshot_tables={name:[table for table in TABLES if (Path(app.config['BACKUP_DIR'])/name/(table+'.csv')).is_file()] for name in snapshots},
                                backup_location=str(Path(app.config['BACKUP_DIR']).resolve()))
 
     @app.post('/backups/create')
@@ -410,12 +436,13 @@ def create_app(test_config=None):
             abort(404)
         folder = backup_folder(app.config['BACKUP_DIR'], name)
         load_backup(folder)
+        if not (folder / (table + '.csv')).is_file(): abort(404)
         return send_file(folder / (table + '.csv'), mimetype='text/csv', as_attachment=True,
                          download_name=table + '.csv', max_age=0)
 
     @app.cli.command('create-backup')
     def create_backup_command():
-        """Save seven CSV files and a checksum manifest on this computer."""
+        """Save all CSV files and a checksum manifest on this computer."""
         folder = create_backup(app.config['MYSQL'], app.config['BACKUP_DIR'])
         click.echo('CSV backup saved to: ' + str(folder))
 
@@ -423,7 +450,7 @@ def create_app(test_config=None):
     @click.argument('folder', type=click.Path(exists=True, file_okay=False, path_type=Path))
     @click.option('--database', required=True, help='A separate empty MySQL database to restore into.')
     def restore_backup_command(folder, database):
-        """Restore all seven CSV files together, without overwriting existing data."""
+        """Restore all CSV files together, without overwriting existing data."""
         original = urlsplit(os.getenv('DATABASE_URL', '')).path.strip('/')
         if database.lower() in (app.config['MYSQL']['database'].lower(), original.lower()):
             raise click.ClickException('Choose a separate empty database; the working databases are protected.')
@@ -454,7 +481,7 @@ def create_app(test_config=None):
 
     @app.cli.command('init-db')
     def init_db_command():
-        """Create the seven tables and first administrator; never erase data."""
+        """Create or upgrade all tables and first administrator; never erase data."""
         initialize(app.config['MYSQL'])
         if not query('SELECT id FROM employees WHERE role=%s AND active=1 LIMIT 1', ('Admin',), one=True):
             name = os.getenv('ADMIN_NAME') or click.prompt('Administrator name')
@@ -470,6 +497,8 @@ def create_app(test_config=None):
         admin = query("SELECT username FROM employees WHERE role='Admin' AND active=1 ORDER BY id LIMIT 1", one=True)
         click.echo('Sign in with department Admin and username: ' + admin['username'])
 
+    from business_routes import register_business_routes
+    register_business_routes(app)
     return app
 
 
