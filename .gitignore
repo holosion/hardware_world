@@ -1,0 +1,39 @@
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Local sign-in reference containing private credentials.
+/login.txt
+
+# Python virtual environments and caches
+.venv/
+venv/
+env/
+myenv/
+__pycache__/
+*.py[cod]
+
+# Local databases and runtime files
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs and local tooling
+*.log
+.vscode/
+
+# Frontend dependencies and build output
+node_modules/
+.next/
+out/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+*lock.json
+# CSV backups contain private business data and password hashes.
+backend/backups/
+backend/receipts/
+tmp/

@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="login-layout">
+    <section class="login-intro">
+      <span class="brand-mark">HW</span>
+      <p class="eyebrow">HARDWARE WORLD</p>
+      <h1>
+        Your store.
+        <br>
+        All in one place.
+      </h1>
+      <p>Keep track of your products, receive stock, and record everyday sales.</p>
+      <div class="login-features">
+        <span>01 &nbsp; Manage your inventory</span>
+        <span>02 &nbsp; Record purchases and sales</span>
+        <span>03 &nbsp; See how your store is doing</span>
+      </div>
+    </section>
+    <section class="login-card">
+      <p class="eyebrow">WELCOME BACK</p>
+      <h2>Sign in to your store</h2>
+      <p class="muted">Enter your employee account details.</p>
+      <form method="post">
+        {{ csrf() }}
+        <label>
+          Department
+          <select name="department" required autocomplete="off">
+            <option value="">Select your department</option>
+            {% for role in roles %}
+              <option value="{{ role }}"
+                      {{ 'selected' if request.form.get("department") == role else '' }}>{{ 'Administration (Admin)' if role == 'Admin' else role ~ ' department' }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          Username<input type="text"
+       name="username"
+       autocomplete="username"
+       required
+       maxlength="50"
+       value="{{ request.form.get('username', '') }}">
+        </label>
+        <label>
+          Password<input type="password"
+       name="password"
+       autocomplete="current-password"
+       required>
+        </label>
+        <button class="button">Sign in</button>
+      </form>
+      <p class="muted small-text">Need an account? Ask your administrator.</p>
+    </section>
+  </div>
+{% endblock %}

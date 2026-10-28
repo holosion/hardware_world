@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="{{ 'content-grid' if can_access('products', 'POST') else '' }}">
+    {% if can_access("products", "POST") %}
+      <section class="panel">
+        <h2>{{ 'Edit product' if editing else 'Add product' }}</h2>
+        <form method="post">
+          {{ csrf() }}
+          {% if editing %}
+            <input type="hidden" name="id" value="{{ editing.id }}">
+          {% endif %}
+          <label>
+            Product name<input name="name"
+       required
+       maxlength="100"
+       value="{{ editing.name if editing else '' }}">
+          </label>
+          <label>
+            Category<select name="category_id" required>
+            <option value="">Choose a category</option>
+            {% for c in categories %}
+              <option value="{{ c.id }}"
+                      {{ 'selected' if editing and editing.category_id==c.id else '' }}>{{ c.name }}</option>
+            {% endfor %}
+            </select>
+          </label>
+          <label>
+            Selling price ({{ currency }})<input type="number"
+       name="price"
+       min="0"
+       max="9999999999.99"
+       step="0.01"
+       required
+       value="{{ editing.price if editing else '' }}">
+          </label>
+          {% if not editing %}
+            <label>
+              Opening stock<input type="number"
+       name="stock"
+       min="0"
+       max="1000000"
+       step="1"
+       value="0"
+       required>
+            </label>
+          {% endif %}
+          <label>
+            Reorder level<input type="number"
+       name="reorder_level"
+       min="0"
+       max="1000000"
+       step="1"
+       required
+       value="{{ editing.reorder_level if editing else 5 }}">
+          </label>
+          <div class="form-actions">
+            <button class="button" {{ 'disabled' if not categories else '' }}>Save product</button>
+            {% if editing %}
+              <a href="{{ url_for('products') }}">Cancel</a>
+            {% endif %}
+          </div>
+          {% if not categories %}
+            <p>
+              <a href="{{ url_for('categories') }}">Add a category first →</a>
+            </p>
+          {% endif %}
+        </form>
+        <p class="muted small-text">After opening stock is entered, purchases increase stock and sales reduce it.</p>
+      </section>
+    {% endif %}
+    <section class="panel">
+      <div class="section-heading">
+        <h2>Product catalogue</h2>
+        <span class="badge">{{ rows | length }} products</span>
+      </div>
+      <form method="get" class="search-form">
+        <label class="search-label">
+          Search products<input name="q" placeholder="Search by product name" value="{{ search }}">
+        </label>
+        <button class="button secondary">Search</button>
+        {% if search %}
+          <a href="{{ url_for('products') }}">Clear</a>
+        {% endif %}
+      </form>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Product</th>
+              <th>Category</th>
+              <th>Price</th>
+              <th>Stock</th>
+              {% if can_access("products", "POST") %}<th>Actions</th>{% endif %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for p in rows %}
+              <tr>
+                <td>{{ p.name }}</td>
+                <td>{{ p.category }}</td>
+                <td>{{ p.price | money }}</td>
+                <td>
+                  <span class="badge {{ 'warning' if p.stock <= p.reorder_level else 'good' }}">{{ p.stock }}</span>
+                </td>
+                {% if can_access("products", "POST") %}
+                  <td class="actions">
+                    <a href="{{ url_for('products', edit=p.id) }}">Edit</a>
+                    <form method="post"
+                          action="{{ url_for('delete_product', record_id=p.id) }}">
+                      {{ csrf() }}
+                      <button class="text-button danger">Delete</button>
+                    </form>
+                  </td>
+                {% endif %}
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="{{ 5 if can_access('products', 'POST') else 4 }}"
+                    class="empty">No products found.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="muted small-text">Products linked to sales or purchases cannot be deleted.</p>
+    </section>
+  </div>
+{% endblock %}

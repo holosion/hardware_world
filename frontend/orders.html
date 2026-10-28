@@ -1,0 +1,8 @@
+{% extends 'base.html' %}{% block content %}
+<section class="panel"><h2>Place supplier order</h2><p>One line per order in this simple form. The database supports multiple lines. Receiving an order creates delivery records and increases stock.</p><form method="post">{{ csrf() }}
+<label>Supplier<select name="supplier_id" required>{% for r in suppliers %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}</select></label>
+<label>Product<select name="product_id" required>{% for r in products %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}</select></label>
+<label>Quantity<input name="quantity" type="number" min="1" max="1000000" required></label>
+<label>Unit cost<input name="unit_cost" type="number" min="0" step="0.01" required></label><button class="button">Place order</button></form></section>
+<section class="panel"><h2>Order history</h2><div class="table-wrap"><table><thead><tr><th>Order</th><th>Supplier</th><th>Date</th><th>Total</th><th>Status</th><th>Action</th></tr></thead><tbody>{% for r in rows %}<tr><td>{{ r.id }}</td><td>{{ r.supplier }}</td><td>{{ r.order_date }}</td><td>{{ r.total | money }}</td><td>{{ r.status }}</td><td>{% if r.status == 'Pending' %}<form method="post" action="{{ url_for('receive_order',order_id=r.id) }}">{{ csrf() }}<button class="button small">Receive stock</button></form>{% endif %}</td></tr>{% else %}<tr><td colspan="6">No orders yet.</td></tr>{% endfor %}</tbody></table></div></section>
+{% endblock %}

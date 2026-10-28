@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="panel error-panel">
+    <p class="eyebrow">HARDWARE WORLD</p>
+    <h1>{{ title }}</h1>
+    <p>{{ message }}</p>
+    <a class="button secondary"
+       href="{{ url_for('dashboard') if user else url_for('login') }}">{{ 'Back to dashboard' if user else 'Back to sign in' }}</a>
+  </section>
+{% endblock %}

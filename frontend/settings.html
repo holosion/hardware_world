@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="two-columns">
+    <section class="panel">
+      <h2>Account details</h2>
+      <dl>
+        <dt>Name</dt>
+        <dd>
+          {{ user.name }}
+        </dd>
+        <dt>Username</dt>
+        <dd>
+          {{ user.username }}
+        </dd>
+        <dt>Email (optional)</dt>
+        <dd>
+          {{ user.email or '-' }}
+        </dd>
+        <dt>Department</dt>
+        <dd>
+          {{ user.role }}
+        </dd>
+      </dl>
+    </section>
+    <section class="panel">
+      <h2>Change password</h2>
+      <form method="post">
+        {{ csrf() }}
+        <label>
+          Current password<input name="current_password"
+       type="password"
+       autocomplete="current-password"
+       required>
+        </label>
+        <label>
+          New password<input name="password"
+       type="password"
+       minlength="8"
+       autocomplete="new-password"
+       required>
+        </label>
+        <label>
+          Confirm new password<input name="confirm_password"
+       type="password"
+       minlength="8"
+       autocomplete="new-password"
+       required>
+        </label>
+        <button class="button">Change password</button>
+      </form>
+    </section>
+  </div>
+{% endblock %}
