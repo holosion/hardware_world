@@ -79,7 +79,9 @@ def initialize(settings):
                 cursor.execute(f'CREATE DATABASE `{name}` CHARACTER SET utf8mb4')
     with connect(settings) as connection:
         with connection.cursor() as cursor:
-            for statement in Path(__file__).with_name('schema.sql').read_text().split(';'):
+            schema = Path(__file__).with_name('schema.sql').read_text()
+            schema = re.sub(r'(?m)^\s*--.*(?:\r?\n|$)', '', schema)
+            for statement in schema.split(';'):
                 if statement.strip():
                     cursor.execute(statement)
             upgrade_roles(cursor)
