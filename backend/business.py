@@ -13,7 +13,7 @@ def upgrade(cursor):
         'employees': {
             'department_id': 'INT NULL REFERENCES departments(id)',
             'supervisor_id': 'INT NULL REFERENCES employees(id)',
-            'nin': 'VARCHAR(30) NULL UNIQUE', 'phone': "VARCHAR(30) NOT NULL DEFAULT ''",
+            'phone': "VARCHAR(30) NOT NULL DEFAULT ''",
             'date_hired': 'DATE NULL', 'salary': 'DECIMAL(12,2) NOT NULL DEFAULT 0 CHECK(salary>=0)',
             'job_type': "ENUM('Cashier','ProcurementOfficer','Accountant','HRStaff','BranchManager') NOT NULL DEFAULT 'Cashier'",
         },
@@ -29,6 +29,9 @@ def upgrade(cursor):
             if name not in existing:
                 # MySQL does not enforce inline REFERENCES; add named constraints below.
                 cursor.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition.split(" REFERENCES")[0]}')
+    cursor.execute("SHOW COLUMNS FROM employees LIKE 'nin'")
+    if cursor.fetchone():
+        cursor.execute('ALTER TABLE employees DROP COLUMN nin')
     for table, column, parent in [('employees','department_id','departments'), ('employees','supervisor_id','employees'),
                                    ('sales','customer_id','customers'), ('sales','branch_id','branches'),
                                    ('purchases','order_id','purchase_orders')]:

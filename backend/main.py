@@ -367,7 +367,12 @@ def create_app(test_config=None):
                              (record_id,), one=True) if record_id else None
             if record_id and existing is None:
                 abort(404)
+            branch_id = integer('branch_id', 1) if request.form.get('branch_id') else None
             department_id = integer('department_id', 1)
+            department = query('SELECT id,branch_id FROM departments WHERE id=%s', (department_id,), one=True)
+            if not department or (branch_id is not None and department['branch_id'] != branch_id):
+                raise ValueError('Choose a department from the selected branch.')
+            branch_id = department['branch_id']
             validate_assignment(department_id, job_type)
             duplicate = query('SELECT id FROM employees WHERE username=%s', (username,), one=True)
             if duplicate and duplicate['id'] != record_id:
@@ -376,32 +381,69 @@ def create_app(test_config=None):
             if password and len(password) < 8:
                 raise ValueError('Passwords must contain at least eight characters.')
             salary = Decimal('0') if not request.form.get('salary', '').strip() else money('salary')
+            supervisor = integer('supervisor_id', 1) if request.form.get('supervisor_id') else None
+            hired = request.form.get('date_hired', '').strip() or None
+            if hired:
+                from datetime import date
+                date.fromisoformat(hired)
+            phone = request.form.get('phone', '').strip()
+            if len(phone) > 30:
+                raise ValueError('Phone must be at most 30 characters.')
+            if supervisor is not None and not query(
+                    'SELECT id FROM employees WHERE id=%s', (supervisor,), one=True):
+                raise ValueError('Choose an existing supervisor.')
             if record_id:
                 if record_id == g.user['id'] and role != 'Admin':
                     raise ValueError('You cannot remove your own administrator access.')
-                execute('UPDATE employees SET name=%s, username=%s, email=%s, role=%s, job_type=%s, department_id=%s, salary=%s WHERE id=%s',
-                        (name, username, email, role, job_type, department_id, salary, record_id))
+                execute('UPDATE employees SET name=%s, username=%s, email=%s, role=%s, job_type=%s, department_id=%s, salary=%s, supervisor_id=%s, phone=%s, date_hired=%s WHERE id=%s',
+                        (name, username, email, role, job_type, department_id, salary, supervisor, phone, hired, record_id))
                 if password:
                     execute('UPDATE employees SET password_hash=%s WHERE id=%s', (generate_password_hash(password), record_id))
             else:
                 if not password:
                     raise ValueError('A password is required for a new employee.')
-                execute('INSERT INTO employees (name,username,email,role,password_hash,job_type,department_id,salary) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)',
-                        (name, username, email, role, generate_password_hash(password), job_type, department_id, salary))
+                execute('INSERT INTO employees (name,username,email,role,password_hash,job_type,department_id,salary,supervisor_id,phone,date_hired) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+                        (name, username, email, role, generate_password_hash(password), job_type, department_id, salary, supervisor, phone, hired))
+                record_id = query('SELECT LAST_INSERT_ID() AS id', one=True)['id']
+            if job_type == 'BranchManager':
+                execute('UPDATE branch_managers SET branch_id=%s WHERE employee_id=%s',
+                        (branch_id, record_id))
             commit()
             flash('Employee saved.', 'success')
             return redirect(url_for('employees'))
-        editing = query('SELECT id,name,username,email,role,job_type,department_id FROM employees WHERE id=%s', (request.args.get('edit'),), one=True) if request.args.get('edit') else None
-        departments = query("SELECT d.id,d.name AS department_name,CONCAT(b.name,' / ',d.name) AS name FROM departments d JOIN branches b ON b.id=d.branch_id ORDER BY b.name,d.name")
+        editing = query("""SELECT e.id,e.name,e.username,e.email,e.role,e.job_type,e.department_id,
+                                  e.salary,e.supervisor_id,e.phone,e.date_hired,
+                                  d.branch_id
+                           FROM employees e
+                           LEFT JOIN departments d ON d.id=e.department_id
+                           LEFT JOIN cashiers c ON c.employee_id=e.id
+                           LEFT JOIN procurement_officers po ON po.employee_id=e.id
+                           LEFT JOIN accountants a ON a.employee_id=e.id
+                           LEFT JOIN hr_staff h ON h.employee_id=e.id
+                           LEFT JOIN branch_managers bm ON bm.employee_id=e.id
+                           WHERE e.id=%s""", (request.args.get('edit'),), one=True) if request.args.get('edit') else None
+        branches = query('SELECT id,name FROM branches ORDER BY name')
+        selected_branch = request.args.get('branch_id', type=int)
+        if 'branch_id' not in request.args and editing:
+            selected_branch = editing['branch_id']
+        if selected_branch is None and request.args.get('department_id', type=int):
+            department_branch = query('SELECT branch_id FROM departments WHERE id=%s',
+                                      (request.args.get('department_id', type=int),), one=True)
+            selected_branch = department_branch['branch_id'] if department_branch else None
+        departments = query("SELECT d.id,d.name AS department_name,d.branch_id,d.name AS name FROM departments d WHERE d.branch_id=%s ORDER BY d.name",
+                            (selected_branch,)) if selected_branch else []
         selected_department = request.args.get('department_id', type=int)
         if 'department_id' not in request.args and editing:
             selected_department = editing['department_id']
         selected = next((d for d in departments if d['id'] == selected_department), None)
         jobs = jobs_for_department(selected['department_name']) if selected else ()
         return render_template('employees.html', title='Employees', editing=editing,
-                               jobs=jobs, job_labels=JOB_LABELS, selected_department=selected_department,
+                               jobs=jobs, job_labels=JOB_LABELS, selected_branch=selected_branch,
+                               selected_department=selected_department,
                                selected=selected, departments=departments,
-                               rows=query("SELECT e.id,e.name,e.username,e.email,e.role,e.active,e.job_type,e.salary,CONCAT(b.name,' / ',d.name) AS department FROM employees e LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN branches b ON b.id=d.branch_id ORDER BY e.name"))
+                               rows=query("SELECT e.id,e.name,e.username,e.email,e.role,e.active,e.job_type,e.salary,CONCAT(b.name,' / ',d.name) AS department FROM employees e LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN branches b ON b.id=d.branch_id ORDER BY e.name"),
+                               supervisors=query('SELECT id,name FROM employees WHERE active=1 ORDER BY name'),
+                               branches=branches)
 
     @app.post('/employees/<int:record_id>/toggle')
     def toggle_employee(record_id):

@@ -23,7 +23,7 @@ Open http://127.0.0.1:8000. If you need to create the Python environment first, 
 
 All 18 assignment entities now have tables: branches, departments, employees, cashiers, procurement_officers, accountants, hr_staff, branch_managers, categories, products, suppliers, supply, customers, sales, sale_items, purchase_orders, payroll and ledger_entries.
 
-Two further implementation tables make 20 in total: purchase_order_items stores order lines; purchases retains actual stock deliveries from the original system. Four additional work-management tables bring the initialized schema to 24 tables. No old business records or passwords are reset by initialization. Missing historical department/branch/NIN values remain unknown. Existing employees receive a provisional Cashier subtype until an Admin assigns their actual job on Staff profiles.
+Two further implementation tables make 20 in total: purchase_order_items stores order lines; purchases retains actual stock deliveries from the original system. Four additional work-management tables bring the initialized schema to 24 tables. No old business records or passwords are reset by initialization. Missing historical department and branch values remain unknown. Existing employees receive a provisional Cashier subtype until an Admin assigns their actual job on Staff profiles.
 
 Department job management adds database-backed departments, employee department membership history, job assignments, status activity history, and in-app notifications. Admins use **Departments & jobs** to assign work and monitor department performance; every signed-in employee can use **My jobs** to start and complete only their own assignments. Run `init-db` again to apply these additive schema upgrades without deleting existing records.
 
@@ -47,7 +47,7 @@ Admin can use every module, including HR and accounting. Sales can view products
 
 Business job subtypes and access roles are separate. An Accountant job does not automatically gain Admin access. The three existing access roles are retained to keep the system simple.
 
-The Employees form starts with a required Department. Click Show jobs to load only that department's supported jobs, then select a required Job and a separate System access role. The department/job pairing is validated on the server. Choosing Accountant creates the corresponding accountants row through the existing MySQL trigger. Staff profiles holds job-specific details such as certification numbers and procurement approval limits. Changing jobs removes the previous subtype row and its job-specific details; keeping the same job preserves those details.
+The Employees form starts with a required Branch, then filters Department and supported Job choices in order. The department/job pairing is validated on the server. Choosing Accountant creates the corresponding accountants row through the existing MySQL trigger. Employee creation and editing saves supervisor, phone, hire date, salary, and managed branch in the same transaction. NIN and the former generic job-detail input are not part of the employee form or employee table. The former Staff profiles page is retained only as a backwards-compatible route and is no longer shown in navigation.
 
 ## Important implementation details
 

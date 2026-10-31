@@ -5,28 +5,37 @@
       <h2>{{ 'Edit employee' if editing else 'Add employee' }}</h2>
       <form method="get" action="{{ url_for('employees') }}">
         {% if editing %}<input type="hidden" name="edit" value="{{ editing.id }}">{% endif %}
-        <label>1. Department<select name="department_id" required>
-          <option value="">Choose a department first</option>
+        <label>1. Branch<select name="branch_id" required>
+          <option value="">Choose a branch first</option>
+          {% for branch in branches %}
+            <option value="{{ branch.id }}" {{ 'selected' if selected_branch == branch.id else '' }}>{{ branch.name }}</option>
+          {% endfor %}
+        </select></label>
+        <label>2. Department<select name="department_id" required {{ 'disabled' if not departments else '' }}>
+          <option value="">{{ 'Choose a department' if departments else 'Select a branch first' }}</option>
           {% for department in departments %}
             <option value="{{ department.id }}" {{ 'selected' if selected_department == department.id else '' }}>{{ department.name }}</option>
           {% endfor %}
         </select></label>
-        <button class="button secondary" {{ 'disabled' if not departments else '' }}>Show jobs</button>
+        <button class="button secondary">{{ 'Show jobs' if departments else 'Load departments' }}</button>
       </form>
-      {% if not departments %}
-        <p>Add a <a href="{{ url_for('business_records', entity='departments') }}">department</a> before creating employees.</p>
+      {% if not branches %}
+        <p>Add a <a href="{{ url_for('business_records', entity='branches') }}">branch</a> before creating employees.</p>
+      {% elif selected_branch and not departments %}
+        <p>Add a department to the selected branch before creating employees.</p>
       {% elif selected and not jobs %}
         <p>This department has no supported jobs. Use Sales &amp; Marketing, Procurement, Accounting, Human Resources or Management.</p>
       {% else %}
-        <p class="muted small-text">Choose the department and click Show jobs before entering employee details.</p>
+        <p class="muted small-text">Choose the branch first, then Choose a department first and click Show jobs before entering employee details.</p>
       {% endif %}
       <form method="post">
         {{ csrf() }}
+        <input type="hidden" name="branch_id" value="{{ selected_branch or '' }}">
         <input type="hidden" name="department_id" value="{{ selected_department or '' }}">
         {% if editing %}
           <input type="hidden" name="id" value="{{ editing.id }}">
         {% endif %}
-        <label>2. Job in {{ selected.department_name if selected else 'the selected department' }}<select name="job_type" required {{ 'disabled' if not jobs else '' }}>
+        <label>3. Job in {{ selected.department_name if selected else 'the selected department' }}<select name="job_type" required {{ 'disabled' if not jobs else '' }}>
           <option value="">{{ "Choose the employee's job" if jobs else 'Select a department and click Show jobs' }}</option>
           {% for job in jobs %}
             <option value="{{ job }}" {{ 'selected' if editing and editing.job_type == job else '' }}>{{ job_labels[job] }}</option>
@@ -62,10 +71,16 @@
           {% endfor %}
           </select>
         </label>
+        <label>Phone<input name="phone" maxlength="30" value="{{ editing.phone if editing else '' }}"></label>
         <label>
           Monthly salary ({{ currency }})<input name="salary" type="number" min="0" step="0.01"
        value="{{ editing.salary if editing else '0' }}" required>
         </label>
+        <h3>Employee profile details</h3>
+        <label>Supervisor<select name="supervisor_id"><option value="">None</option>
+          {% for supervisor in supervisors %}<option value="{{ supervisor.id }}" {{ 'selected' if editing and editing.supervisor_id == supervisor.id else '' }}>{{ supervisor.name }}</option>{% endfor %}
+        </select></label>
+        <label>Date hired<input name="date_hired" type="date" value="{{ editing.date_hired if editing and editing.date_hired else '' }}"></label>
         <label>
           {{ 'New password (leave blank to keep current)' if editing else 'Password' }}<input type="password"
        name="password"
@@ -80,8 +95,7 @@
           {% endif %}
         </div>
       </form>
-      <p class="muted small-text">Job describes the employee's work and creates the matching job record, such as Accountant in the accountants table. Department identifies where they work. System access role controls which pages they can use.</p>
-      <p class="muted small-text">Use <a href="{{ url_for('staff_profiles') }}">Staff profiles</a> for certification numbers, approval limits and other job details. Changing a job removes its previous subtype details.</p>
+      <p class="muted small-text">Branch, department and job are selected in order so every employee is assigned to the correct part of the business.</p>
       <p class="muted small-text">Sales staff record sales and view stock. Purchasing staff manage products, categories, suppliers, and purchases. Admins have full access.</p>
     </section>
     <section class="panel">

@@ -72,14 +72,10 @@ def register_business_routes(app):
                 parent = parents[parent]
             hired = request.form.get('date_hired','').strip() or None
             if hired: date.fromisoformat(hired)
-            nin = request.form.get('nin','').strip() or None
             phone = request.form.get('phone','').strip()
-            if (nin and len(nin)>30) or len(phone)>30: raise ValueError('NIN and phone must be at most 30 characters.')
-            execute('UPDATE employees SET department_id=%s,supervisor_id=%s,nin=%s,phone=%s,date_hired=%s,salary=%s,job_type=%s WHERE id=%s',
-                    (department,supervisor,nin,phone,hired,money('salary'),job,employee_id))
-            field = {'Cashier':'pos_terminal_id','ProcurementOfficer':'approval_limit','Accountant':'certification_number','HRStaff':'hr_role','BranchManager':'management_level'}[job]
-            detail = money('detail') if job=='ProcurementOfficer' else required('detail',50 if job=='Cashier' else 100)
-            execute(f'UPDATE {SUBTYPES[job]} SET {field}=%s WHERE employee_id=%s',(detail,employee_id))
+            if len(phone)>30: raise ValueError('Phone must be at most 30 characters.')
+            execute('UPDATE employees SET department_id=%s,supervisor_id=%s,phone=%s,date_hired=%s,salary=%s,job_type=%s WHERE id=%s',
+                    (department,supervisor,phone,hired,money('salary'),job,employee_id))
             if job=='BranchManager':
                 branch = integer('branch_id',1) if request.form.get('branch_id') else None
                 execute('UPDATE branch_managers SET branch_id=%s WHERE employee_id=%s',(branch,employee_id))
@@ -87,7 +83,7 @@ def register_business_routes(app):
             flash('Profile and employee subtype saved.', 'success')
             return redirect(url_for('staff_profiles'))
         return render_template('profiles.html', title='Staff profiles', jobs=SUBTYPES,
-                               rows=query('SELECT id,name,job_type,department_id,supervisor_id,nin,phone,date_hired,salary FROM employees ORDER BY name'),
+                               rows=query('SELECT id,name,job_type,department_id,supervisor_id,phone,date_hired,salary FROM employees ORDER BY name'),
                                departments=query('SELECT d.id,CONCAT(b.name,\' / \',d.name) AS name FROM departments d JOIN branches b ON b.id=d.branch_id'),
                                branches=query('SELECT id,name FROM branches ORDER BY name'))
 
@@ -158,7 +154,6 @@ def register_business_routes(app):
         rows = []
         checks = {
             'Employees missing a department': 'SELECT COUNT(*) AS n FROM employees WHERE department_id IS NULL',
-            'Employees missing NIN': "SELECT COUNT(*) AS n FROM employees WHERE nin IS NULL OR TRIM(nin)=''",
             'Branches without a manager': 'SELECT COUNT(*) AS n FROM branches b LEFT JOIN branch_managers m ON m.branch_id=b.id WHERE m.employee_id IS NULL',
             'Suppliers without email': "SELECT COUNT(*) AS n FROM suppliers WHERE TRIM(email)=''",
             'Sales without a branch': 'SELECT COUNT(*) AS n FROM sales WHERE branch_id IS NULL',

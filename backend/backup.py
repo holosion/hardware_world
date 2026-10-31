@@ -26,7 +26,7 @@ TABLES = {
     'purchases': ('id', 'supplier_id', 'product_id', 'employee_id', 'quantity', 'unit_cost', 'created_at'),
 }
 # Explicit whitelist and dependency order; generated net_pay is intentionally omitted.
-TABLES['employees'] += ('department_id', 'supervisor_id', 'nin', 'phone', 'date_hired', 'salary', 'job_type')
+TABLES['employees'] += ('department_id', 'supervisor_id', 'phone', 'date_hired', 'salary', 'job_type')
 TABLES['suppliers'] += ('contact_person', 'address')
 TABLES['products'] += ('description',)
 TABLES['sales'] += ('customer_id', 'branch_id')
