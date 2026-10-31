@@ -27,6 +27,8 @@ Two further implementation tables make 20 in total: purchase_order_items stores 
 
 Department job management adds database-backed departments, employee department membership history, job assignments, status activity history, and in-app notifications. Admins use **Departments & jobs** to assign work and monitor department performance; every signed-in employee can use **My jobs** to start and complete only their own assignments. Run `init-db` again to apply these additive schema upgrades without deleting existing records.
 
+Company funds are stored in the `company_finance` singleton and are seeded to UGX 800,000,000 only when the account does not exist. Employee monthly salaries are stored on `employees`. Admins can pay an employee from the Employees page or process the current month in Payroll; each payment creates the existing payroll/ledger record and deducts the net amount transactionally, with duplicate-month payments rejected. Employees with no linked business history can be deleted; employees referenced by historical records are deactivated instead so audit and business history remain intact.
+
 The source diagrams are reproduced unchanged in the PDF, with corrections explained separately. The physical model and complete SQL export reflect the actual database. In particular, supply has a composite primary key; sale_items retains its existing ID and adds a unique sale/product pair; payroll has one employee/month pair.
 
 ## Features

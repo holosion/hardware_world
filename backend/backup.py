@@ -195,8 +195,13 @@ def restore_backup(folder, settings):
                 for table in TABLES:
                     # Empty-table gap locks also protect against concurrent inserts.
                     cursor.execute(f'SELECT {TABLES[table][0]} FROM {table} FOR UPDATE')
-                    if cursor.fetchone():
+                    existing = cursor.fetchone()
+                    if existing and table != 'company_finance':
                         raise ValueError('Restore requires an empty database. Existing records were not changed.')
+                    if existing and table == 'company_finance':
+                        cursor.execute('DELETE FROM company_finance WHERE id=1 AND balance=800000000.00')
+                        if cursor.rowcount != 1:
+                            raise ValueError('Restore requires an empty database. Existing records were not changed.')
                 for table, columns in TABLES.items():
                     if contents[table]:
                         placeholders = ', '.join(['%s'] * len(columns))

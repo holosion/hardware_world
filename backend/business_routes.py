@@ -98,8 +98,13 @@ def register_business_routes(app):
             if month.day != 1: raise ValueError('Use the first day of the payroll month, for example 2026-10-01.')
             gross, deductions = money('gross_pay'),money('deductions')
             if deductions>gross: raise ValueError('Deductions cannot exceed gross pay.')
+            net_pay = gross - deductions
+            account = query('SELECT balance FROM company_finance WHERE id=1 FOR UPDATE', one=True)
+            if account['balance'] < net_pay:
+                raise ValueError('Company funds are insufficient for this payroll payment.')
             execute('INSERT INTO payroll(employee_id,pay_month,gross_pay,deductions) VALUES(%s,%s,%s,%s)',
                     (integer('employee_id',1),month,gross,deductions))
+            execute('UPDATE company_finance SET balance=balance-%s WHERE id=1', (net_pay,))
             commit()
             flash('Payroll saved. MySQL generated the payroll ledger entry.', 'success')
             return redirect(url_for('payroll'))

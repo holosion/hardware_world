@@ -47,6 +47,7 @@ class StoreTests(unittest.TestCase):
             execute('UPDATE employees SET supervisor_id=NULL')
             for table in reversed(TABLES):
                 execute(f'DELETE FROM {table}')
+            execute('INSERT INTO company_finance(id,balance) VALUES(1,800000000.00)')
             execute('SET @restoring_snapshot=0')
             from department_jobs import DEPARTMENT_JOBS
             branch = execute('INSERT INTO branches(name,location) VALUES(%s,%s)', ('Fixture Branch','Kampala'))
@@ -169,7 +170,7 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
         self.assertIn(b'<option selected>Sales</option>', self.client.get('/employees.html').data)
         with self.app.app_context():
-            self.assertEqual(len(query('SHOW TABLES')), 24)
+            self.assertEqual(len(query('SHOW TABLES')), 25)
 
     def test_department_job_lifecycle_and_ownership(self):
         department = self.job_departments['Cashier']
@@ -189,6 +190,33 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.read('SELECT COUNT(*) AS n FROM job_activity_history WHERE job_id=%s',
                                    (job['id'],))['n'], 3)
         self.assertEqual(self.post(f'/jobs/{job["id"]}/admin-action', {'action': 'cancel'}).status_code, 403)
+
+    def test_employee_salary_payment_deducts_company_funds_once(self):
+        response = self.post('/employees.html', {
+            'name': 'Paid Staff', 'username': 'paid.staff', 'role': 'Sales',
+            'password': 'test-password', 'salary': '2500000'})
+        self.assertEqual(response.status_code, 302)
+        employee = self.read('SELECT id,salary FROM employees WHERE username=%s', ('paid.staff',))
+        self.assertEqual(employee['salary'], Decimal('2500000.00'))
+        before = self.read('SELECT balance FROM company_finance WHERE id=1')['balance']
+        self.assertEqual(self.post(f'/employees/{employee["id"]}/pay').status_code, 302)
+        after = self.read('SELECT balance FROM company_finance WHERE id=1')['balance']
+        self.assertEqual(after, before - Decimal('2500000.00'))
+        self.assertEqual(self.post(f'/employees/{employee["id"]}/pay').status_code, 400)
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM payroll WHERE employee_id=%s',
+                                   (employee['id'],))['n'], 1)
+
+    def test_employee_delete_removes_unlinked_account_and_preserves_linked_history(self):
+        self.assertEqual(self.post('/employees.html', {
+            'name': 'Disposable Staff', 'username': 'disposable.staff', 'role': 'Sales',
+            'password': 'test-password', 'salary': '0'}).status_code, 302)
+        disposable = self.read('SELECT id FROM employees WHERE username=%s', ('disposable.staff',))
+        self.assertEqual(self.post(f'/employees/{disposable["id"]}/delete').status_code, 302)
+        self.assertIsNone(self.read('SELECT id FROM employees WHERE id=%s', (disposable['id'],)))
+        self.assertEqual(self.post('/departments/assign', {
+            'employee_id': self.staff, 'department_id': self.job_departments['Cashier']}).status_code, 302)
+        self.assertEqual(self.post(f'/employees/{self.staff}/delete').status_code, 302)
+        self.assertEqual(self.read('SELECT active FROM employees WHERE id=%s', (self.staff,))['active'], 0)
 
     def test_assignment_pages_and_entity_permissions(self):
         for path in ('/staff-profiles.html','/payroll.html','/ledger.html','/data-quality.html','/orders.html',
@@ -675,7 +703,7 @@ class StoreTests(unittest.TestCase):
                 with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
                     self.assertIn('products.csv', archive.namelist())
                     self.assertIn('manifest.json', archive.namelist())
-                    self.assertEqual(len(archive.namelist()), 25)
+                    self.assertEqual(len(archive.namelist()), 26)
             self.assertEqual(self.client.get(f'/backups/{folder.name}/secret.csv').status_code, 404)
             self.assertEqual(self.client.get('/backups/invalid/products.csv').status_code, 400)
             self.login('staff')

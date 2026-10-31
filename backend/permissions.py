@@ -31,7 +31,7 @@ ROLE_ACCESS['Admin'].update({'department_jobs': WRITE, 'department_create': ('PO
                              'department_status': ('POST',), 'job_create': ('POST',),
                              'job_admin_action': ('POST',), 'my_jobs': READ,
                              'job_employee_action': ('POST',), 'notifications': READ})
-ROLE_ACCESS['Admin'].update({'employee_delete': ('POST',), 'employee_pay': ('POST',),
+ROLE_ACCESS['Admin'].update({'delete_employee': ('POST',), 'employee_pay': ('POST',),
                              'payroll_process': ('POST',)})
 for role in ('Sales', 'Purchasing'):
     ROLE_ACCESS[role].update({'my_jobs': READ, 'job_employee_action': ('POST',), 'notifications': READ})
