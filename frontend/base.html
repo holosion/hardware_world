@@ -41,6 +41,17 @@
                  href="{{ url_for('employees') }}">
                 <span aria-hidden="true">○</span>Employees</a>
             {% endif %}
+            {% if can_access("my_jobs") %}
+              <a class="nav-link {{ 'active' if request.endpoint == 'my_jobs' else '' }}"
+                 href="{{ url_for('my_jobs') }}">My jobs</a>
+            {% endif %}
+            {% if user.role == 'Admin' %}
+              <a class="nav-link {{ 'active' if request.endpoint == 'department_jobs' else '' }}"
+                 href="{{ url_for('department_jobs') }}">Departments &amp; jobs</a>
+            {% endif %}
+            {% if can_access("notifications") %}
+              <a class="nav-link" href="{{ url_for('notifications') }}">Notifications</a>
+            {% endif %}
             {% if can_access("backups") %}
               <a class="nav-link {{ 'active' if request.endpoint == 'backups' else '' }}"
                  href="{{ url_for('backups') }}"><span aria-hidden="true">↓</span>CSV backups</a>
@@ -90,6 +101,7 @@
     </footer>
     </div>
     </div>
+
   {% endif %}
 </body>
 </html>

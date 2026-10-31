@@ -14,6 +14,8 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from db import ROOT, close_db, commit, connect, connection_settings, execute, get_db, initialize, query, username_from_name
 from backup import TABLES, backup_folder, create_backup, list_backups, load_backup, restore_backup, zip_backup
 from permissions import ROLES, allowed
+from business import SUBTYPES
+from department_jobs import jobs_for_department, validate_assignment, JOB_LABELS
 
 
 def required(name, limit=100):
@@ -169,6 +171,7 @@ def create_app(test_config=None):
     def dashboard():
         counts = query('SELECT COUNT(*) AS products, COALESCE(SUM(stock),0) AS units, '
                        'COALESCE(SUM(stock <= reorder_level),0) AS low_stock FROM products', one=True)
+        company_finance = query('SELECT balance FROM company_finance WHERE id=1', one=True)
         low_stock = query('SELECT * FROM products WHERE stock <= reorder_level ORDER BY stock, name LIMIT 8')
         totals, recent = None, []
         if can_access('sales'):
@@ -177,7 +180,7 @@ def create_app(test_config=None):
             recent = query('SELECT s.id, s.customer_name, s.created_at, SUM(si.quantity*si.unit_price) AS total '
                            'FROM sales s JOIN sale_items si ON si.sale_id=s.id GROUP BY s.id ORDER BY s.id DESC LIMIT 5')
         return render_template('index.html', title='Dashboard', counts=counts, totals=totals,
-                               low_stock=low_stock, recent=recent)
+                               low_stock=low_stock, recent=recent, company_finance=company_finance)
 
     @app.route('/categories.html', methods=['GET', 'POST'])
     def categories():
@@ -352,35 +355,53 @@ def create_app(test_config=None):
     def employees():
         if request.method == 'POST':
             name, role = required('name'), required('role')
+            job_type = required('job_type')
+            if job_type not in SUBTYPES:
+                raise ValueError('Choose a valid employee job.')
             username = valid_username(required('username', 50))
             email = request.form.get('email', '').strip() or None
             if (email and ('@' not in email or len(email) > 150)) or role not in ROLES:
                 raise ValueError('Choose Admin, Sales, or Purchasing and provide a valid email if used.')
             record_id = integer('id', 1) if request.form.get('id') else None
+            existing = query('SELECT department_id FROM employees WHERE id=%s FOR UPDATE',
+                             (record_id,), one=True) if record_id else None
+            if record_id and existing is None:
+                abort(404)
+            department_id = integer('department_id', 1)
+            validate_assignment(department_id, job_type)
             duplicate = query('SELECT id FROM employees WHERE username=%s', (username,), one=True)
             if duplicate and duplicate['id'] != record_id:
                 raise ValueError('That username is already in use. Choose another username.')
             password = request.form.get('password', '')
             if password and len(password) < 8:
                 raise ValueError('Passwords must contain at least eight characters.')
+            salary = Decimal('0') if not request.form.get('salary', '').strip() else money('salary')
             if record_id:
                 if record_id == g.user['id'] and role != 'Admin':
                     raise ValueError('You cannot remove your own administrator access.')
-                execute('UPDATE employees SET name=%s, username=%s, email=%s, role=%s WHERE id=%s',
-                        (name, username, email, role, record_id))
+                execute('UPDATE employees SET name=%s, username=%s, email=%s, role=%s, job_type=%s, department_id=%s, salary=%s WHERE id=%s',
+                        (name, username, email, role, job_type, department_id, salary, record_id))
                 if password:
                     execute('UPDATE employees SET password_hash=%s WHERE id=%s', (generate_password_hash(password), record_id))
             else:
                 if not password:
                     raise ValueError('A password is required for a new employee.')
-                execute('INSERT INTO employees (name,username,email,role,password_hash) VALUES (%s,%s,%s,%s,%s)',
-                        (name, username, email, role, generate_password_hash(password)))
+                execute('INSERT INTO employees (name,username,email,role,password_hash,job_type,department_id,salary) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)',
+                        (name, username, email, role, generate_password_hash(password), job_type, department_id, salary))
             commit()
             flash('Employee saved.', 'success')
             return redirect(url_for('employees'))
-        editing = query('SELECT id,name,username,email,role FROM employees WHERE id=%s', (request.args.get('edit'),), one=True) if request.args.get('edit') else None
+        editing = query('SELECT id,name,username,email,role,job_type,department_id FROM employees WHERE id=%s', (request.args.get('edit'),), one=True) if request.args.get('edit') else None
+        departments = query("SELECT d.id,d.name AS department_name,CONCAT(b.name,' / ',d.name) AS name FROM departments d JOIN branches b ON b.id=d.branch_id ORDER BY b.name,d.name")
+        selected_department = request.args.get('department_id', type=int)
+        if 'department_id' not in request.args and editing:
+            selected_department = editing['department_id']
+        selected = next((d for d in departments if d['id'] == selected_department), None)
+        jobs = jobs_for_department(selected['department_name']) if selected else ()
         return render_template('employees.html', title='Employees', editing=editing,
-                               rows=query('SELECT id,name,username,email,role,active FROM employees ORDER BY name'))
+                               jobs=jobs, job_labels=JOB_LABELS, selected_department=selected_department,
+                               selected=selected, departments=departments,
+                               rows=query("SELECT e.id,e.name,e.username,e.email,e.role,e.active,e.job_type,e.salary,CONCAT(b.name,' / ',d.name) AS department FROM employees e LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN branches b ON b.id=d.branch_id ORDER BY e.name"))
 
     @app.post('/employees/<int:record_id>/toggle')
     def toggle_employee(record_id):
@@ -390,6 +411,86 @@ def create_app(test_config=None):
         commit()
         flash('Employee status updated.', 'success')
         return redirect(url_for('employees'))
+
+    @app.post('/employees/<int:record_id>/delete')
+    def delete_employee(record_id):
+        if record_id == g.user['id']:
+            raise ValueError('You cannot delete your own account.')
+        employee = query('SELECT id,name FROM employees WHERE id=%s FOR UPDATE', (record_id,), one=True)
+        if not employee:
+            abort(404)
+        # Business records are retained; only accounts with no historical references
+        # can be physically removed. Others are disabled instead of losing audit links.
+        references = query(
+            """SELECT
+                 (SELECT COUNT(*) FROM sales WHERE employee_id=%s) +
+                 (SELECT COUNT(*) FROM purchases WHERE employee_id=%s) +
+                 (SELECT COUNT(*) FROM payroll WHERE employee_id=%s) +
+                 (SELECT COUNT(*) FROM employee_department_memberships WHERE employee_id=%s OR assigned_by=%s) +
+                 (SELECT COUNT(*) FROM job_assignments WHERE employee_id=%s OR assigned_by=%s) AS total""",
+            (record_id, record_id, record_id, record_id, record_id, record_id, record_id), one=True)
+        if references['total']:
+            execute('UPDATE employees SET active=0 WHERE id=%s', (record_id,))
+            message = 'Employee has linked history, so the account was deactivated instead of deleting records.'
+        else:
+            execute('DELETE FROM employees WHERE id=%s', (record_id,))
+            message = 'Employee deleted.'
+        commit()
+        flash(message, 'success')
+        return redirect(url_for('employees'))
+
+    @app.post('/employees/<int:record_id>/pay')
+    def employee_pay(record_id):
+        from datetime import date
+        employee = query('SELECT id,name,salary,active FROM employees WHERE id=%s FOR UPDATE',
+                         (record_id,), one=True)
+        account = query('SELECT balance FROM company_finance WHERE id=1 FOR UPDATE', one=True)
+        if not employee or not employee['active']:
+            raise ValueError('Only an active employee can be paid.')
+        salary = employee['salary'] or Decimal('0')
+        if salary <= 0:
+            raise ValueError('Set a monthly salary before paying this employee.')
+        month = date.today().replace(day=1)
+        if query('SELECT id FROM payroll WHERE employee_id=%s AND pay_month=%s',
+                 (record_id, month), one=True):
+            raise ValueError('This employee has already been paid for the current month.')
+        if account['balance'] < salary:
+            raise ValueError('Company funds are insufficient for this salary payment.')
+        payroll_id = execute(
+            'INSERT INTO payroll(employee_id,pay_month,gross_pay,deductions) VALUES(%s,%s,%s,0)',
+            (record_id, month, salary))
+        execute('UPDATE company_finance SET balance=balance-%s WHERE id=1', (salary,))
+        commit()
+        flash(f'{employee["name"]} was paid {salary:,.2f} {os.getenv("CURRENCY", "UGX")}.', 'success')
+        return redirect(url_for('employees'))
+
+    @app.post('/payroll/process')
+    def payroll_process():
+        from datetime import date
+        employees = query("SELECT id,name,salary FROM employees WHERE active=1 AND salary>0 FOR UPDATE")
+        month = date.today().replace(day=1)
+        account = query('SELECT balance FROM company_finance WHERE id=1 FOR UPDATE', one=True)
+        paid = 0
+        total = Decimal('0')
+        for employee in employees:
+            if query('SELECT id FROM payroll WHERE employee_id=%s AND pay_month=%s',
+                     (employee['id'], month), one=True):
+                continue
+            total += employee['salary']
+        if total > account['balance']:
+            raise ValueError('Company funds are insufficient for the monthly payroll.')
+        for employee in employees:
+            if query('SELECT id FROM payroll WHERE employee_id=%s AND pay_month=%s',
+                     (employee['id'], month), one=True):
+                continue
+            execute('INSERT INTO payroll(employee_id,pay_month,gross_pay,deductions) VALUES(%s,%s,%s,0)',
+                    (employee['id'], month, employee['salary']))
+            paid += 1
+        if paid:
+            execute('UPDATE company_finance SET balance=balance-%s WHERE id=1', (total,))
+        commit()
+        flash(f'Monthly payroll processed for {paid} employee(s).', 'success')
+        return redirect(url_for('payroll'))
 
     @app.route('/settings.html', methods=['GET', 'POST'])
     def settings():

@@ -17,6 +17,11 @@
       <strong>{{ counts.products }}</strong>
       <small>{{ counts.units }} units in stock</small>
     </article>
+    <article class="stat">
+      <span>Company funds</span>
+      <strong>{{ company_finance.balance | money }}</strong>
+      <small>{{ currency }} available after payroll</small>
+    </article>
     {% if can_access("sales") %}
       <article class="stat">
         <span>Total sales revenue</span>

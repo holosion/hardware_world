@@ -4,12 +4,13 @@ from decimal import Decimal
 
 from flask import abort, flash, g, redirect, render_template, request, url_for
 from business import SUBTYPES
+from department_jobs import DEPARTMENT_JOBS, validate_assignment
 from db import commit, execute, query
 
 # Each form names a fixed table and fixed columns. URL/form values never become SQL identifiers.
 CATALOG = {
     'branches': ('Branches', [('name','text'),('location','text'),('contact_number','text')]),
-    'departments': ('Departments', [('branch_id','branches'),('name','text')]),
+    'departments': ('Departments', [('branch_id','branches'),('name','department_name')]),
     'customers': ('Registered customers', [('name','text'),('phone','text')]),
     'supply': ('Supplier product catalogue', [('supplier_id','suppliers'),('product_id','products'),('cost_price','money'),('lead_time_days','number')]),
 }
@@ -32,6 +33,11 @@ def register_business_routes(app):
                 if kind == 'money': values.append(money(field))
                 elif kind == 'number': values.append(integer(field))
                 elif kind in ('branches','suppliers','products'): values.append(integer(field,1))
+                elif kind == 'department_name':
+                    name = required(field)
+                    if name not in DEPARTMENT_JOBS:
+                        raise ValueError('Choose one of the supported departments.')
+                    values.append(name)
                 else: values.append(required(field, 30 if field in ('phone','contact_number') else 150 if field == 'location' else 100))
             columns = ','.join(field for field,_ in fields)
             execute(f'INSERT INTO {entity} ({columns}) VALUES ({",".join(["%s"]*len(values))})', tuple(values))
@@ -39,6 +45,7 @@ def register_business_routes(app):
             flash('Record saved.', 'success')
             return redirect(url_for('business_records', entity=entity))
         choices = {kind: query(f'SELECT id,name FROM {kind} ORDER BY name') for _,kind in fields if kind in ('branches','suppliers','products')}
+        choices['department_name'] = [{'id': name, 'name': name} for name in DEPARTMENT_JOBS]
         return render_template('business.html', title=title, fields=fields, choices=choices,
                                rows=query(f'SELECT * FROM {entity} LIMIT 500'), entity=entity)
 
@@ -50,7 +57,8 @@ def register_business_routes(app):
             if not employee: raise ValueError('Choose an existing employee.')
             job = required('job_type')
             if job not in SUBTYPES: raise ValueError('Choose an existing job type.')
-            department = integer('department_id',1) if request.form.get('department_id') else None
+            department = integer('department_id',1)
+            validate_assignment(department, job)
             supervisor = integer('supervisor_id',1) if request.form.get('supervisor_id') else None
             # Serialize hierarchy edits to prevent concurrent creation of a cycle.
             all_staff = query('SELECT id,supervisor_id FROM employees ORDER BY id FOR UPDATE')
@@ -154,3 +162,237 @@ def register_business_routes(app):
         for label,sql in checks.items(): rows.append({'check':label,'records_to_review':query(sql,one=True)['n']})
         return render_template('records.html', title='Data quality review', rows=rows,
                                note='Review missing master data using the relevant forms. Historical unknown details are left empty instead of being invented. Low stock is an operational alert, not invalid data.')
+
+    @app.get('/department-jobs.html')
+    def department_jobs():
+        departments = query(
+            """SELECT d.id,d.name,d.description,d.status,d.manager_id,manager.name AS manager,
+                      COUNT(DISTINCT CASE WHEN e.active=1 THEN e.id END) AS employee_count,
+                      COUNT(DISTINCT j.id) AS job_count,
+                      COUNT(DISTINCT CASE WHEN j.status='Completed' THEN j.id END) AS completed_count
+               FROM departments d
+               LEFT JOIN employees e ON e.department_id=d.id
+               LEFT JOIN employees manager ON manager.id=d.manager_id
+               LEFT JOIN job_assignments j ON j.department_id=d.id
+               GROUP BY d.id ORDER BY d.name""")
+        employees = query(
+            """SELECT e.id,e.name,e.active,e.department_id,d.name AS department
+               FROM employees e LEFT JOIN departments d ON d.id=e.department_id
+               ORDER BY d.name,e.name""")
+        jobs = query(
+            """SELECT j.*,e.name AS employee,d.name AS department,
+                      CASE WHEN j.status NOT IN ('Completed','Cancelled')
+                                AND j.due_date IS NOT NULL AND j.due_date<CURDATE()
+                           THEN 'Overdue' ELSE j.status END AS display_status
+               FROM job_assignments j JOIN employees e ON e.id=j.employee_id
+               JOIN departments d ON d.id=j.department_id
+               ORDER BY j.due_date IS NULL,j.due_date,j.id DESC""")
+        return render_template('department-jobs.html', title='Departments and jobs',
+                               departments=departments, employees=employees, jobs=jobs,
+                               active_employees=[e for e in employees if e['active']],
+                               branches=query('SELECT id,name FROM branches ORDER BY name'))
+
+    @app.post('/departments/create')
+    def department_create():
+        name, description = required('name', 100), request.form.get('description', '').strip()
+        if len(description) > 500:
+            raise ValueError('Department description must be at most 500 characters.')
+        branch_id = integer('branch_id', 1)
+        if not query('SELECT id FROM branches WHERE id=%s', (branch_id,), one=True):
+            raise ValueError('Choose an existing branch.')
+        execute('INSERT INTO departments(branch_id,name,description) VALUES(%s,%s,%s)',
+                (branch_id, name, description))
+        commit()
+        flash('Department created.', 'success')
+        return redirect(url_for('department_jobs'))
+
+    @app.post('/departments/assign')
+    def department_assign():
+        employee_id, department_id = integer('employee_id', 1), integer('department_id', 1)
+        employee = query('SELECT id,active,department_id FROM employees WHERE id=%s FOR UPDATE',
+                         (employee_id,), one=True)
+        department = query("SELECT id,status FROM departments WHERE id=%s", (department_id,), one=True)
+        if not employee or not employee['active']:
+            raise ValueError('Only an existing active employee can be assigned.')
+        if not department or department['status'] != 'Active':
+            raise ValueError('Choose an active department.')
+        execute('UPDATE employee_department_memberships SET is_active=0 WHERE employee_id=%s AND is_active=1',
+                (employee_id,))
+        execute("""INSERT INTO employee_department_memberships
+                   (employee_id,department_id,assigned_by) VALUES(%s,%s,%s)""",
+                (employee_id, department_id, g.user['id']))
+        execute('UPDATE employees SET department_id=%s WHERE id=%s', (department_id, employee_id))
+        execute('INSERT INTO notifications(employee_id,message) VALUES(%s,%s)',
+                (employee_id, 'Your department assignment was updated.'))
+        commit()
+        flash('Employee assigned to the department.', 'success')
+        return redirect(url_for('department_jobs'))
+
+    @app.post('/departments/manager')
+    def department_manager():
+        department_id = integer('department_id', 1)
+        manager_id = integer('manager_id', 1) if request.form.get('manager_id') else None
+        department = query("SELECT id,status FROM departments WHERE id=%s FOR UPDATE",
+                           (department_id,), one=True)
+        if not department:
+            abort(404)
+        if manager_id is not None:
+            manager = query('SELECT id,active,department_id FROM employees WHERE id=%s',
+                            (manager_id,), one=True)
+            if not manager or not manager['active'] or manager['department_id'] != department_id:
+                raise ValueError('The manager must be an active employee in this department.')
+        execute('UPDATE departments SET manager_id=%s WHERE id=%s', (manager_id, department_id))
+        if manager_id is not None:
+            execute('INSERT INTO notifications(employee_id,message) VALUES(%s,%s)',
+                    (manager_id, 'You are now the manager of a department.'))
+        commit()
+        flash('Department manager updated.', 'success')
+        return redirect(url_for('department_jobs'))
+
+    @app.post('/departments/<int:department_id>/status')
+    def department_status(department_id):
+        department = query('SELECT id,status FROM departments WHERE id=%s FOR UPDATE',
+                           (department_id,), one=True)
+        if not department:
+            abort(404)
+        status = 'Inactive' if department['status'] == 'Active' else 'Active'
+        execute('UPDATE departments SET status=%s WHERE id=%s', (status, department_id))
+        commit()
+        flash(f'Department {status.lower()}.', 'success')
+        return redirect(url_for('department_jobs'))
+
+    @app.post('/jobs/create')
+    def job_create():
+        department_id, employee_id = integer('department_id', 1), integer('employee_id', 1)
+        title, description = required('title', 150), request.form.get('description', '').strip()
+        priority = request.form.get('priority', 'Medium')
+        if priority not in ('Low', 'Medium', 'High', 'Urgent'):
+            raise ValueError('Choose a valid job priority.')
+        if len(description) > 2000:
+            raise ValueError('Job description must be at most 2,000 characters.')
+        department = query("SELECT id,status FROM departments WHERE id=%s", (department_id,), one=True)
+        employee = query('SELECT id,active,department_id FROM employees WHERE id=%s FOR UPDATE',
+                         (employee_id,), one=True)
+        if not department or department['status'] != 'Active':
+            raise ValueError('Choose an active department.')
+        if not employee or not employee['active'] or employee['department_id'] != department_id:
+            raise ValueError('The employee must be active and belong to the selected department.')
+        due_date = request.form.get('due_date', '').strip() or None
+        if due_date:
+            due_date = date.fromisoformat(due_date)
+        job_id = execute("""INSERT INTO job_assignments
+                            (department_id,employee_id,title,description,priority,assigned_by,due_date)
+                            VALUES(%s,%s,%s,%s,%s,%s,%s)""",
+                         (department_id, employee_id, title, description, priority, g.user['id'], due_date))
+        execute("""INSERT INTO job_activity_history
+                   (job_id,actor_id,action,new_status,comment) VALUES(%s,%s,'Assigned','Pending',%s)""",
+                (job_id, g.user['id'], 'Job assigned.'))
+        execute('INSERT INTO notifications(employee_id,job_id,message) VALUES(%s,%s,%s)',
+                (employee_id, job_id, f'New job assigned: {title}'))
+        commit()
+        flash('Job assigned.', 'success')
+        return redirect(url_for('department_jobs'))
+
+    @app.post('/jobs/<int:job_id>/admin-action')
+    def job_admin_action(job_id):
+        action = request.form.get('action', '')
+        job = query('SELECT * FROM job_assignments WHERE id=%s FOR UPDATE', (job_id,), one=True)
+        if not job:
+            abort(404)
+        if action == 'cancel':
+            if job['status'] in ('Completed', 'Cancelled'):
+                raise ValueError('This job cannot be cancelled in its current state.')
+            new_status, event = 'Cancelled', 'Cancelled'
+        elif action == 'reopen':
+            if job['status'] != 'Cancelled':
+                raise ValueError('Only cancelled jobs can be reopened.')
+            new_status, event = 'Pending', 'Reopened'
+        elif action == 'reassign':
+            employee_id = integer('employee_id', 1)
+            employee = query('SELECT id,name,active,department_id FROM employees WHERE id=%s FOR UPDATE',
+                             (employee_id,), one=True)
+            if not employee or not employee['active'] or employee['department_id'] != job['department_id']:
+                raise ValueError('The replacement employee must be active and belong to the job department.')
+            old_employee = job['employee_id']
+            execute('UPDATE job_assignments SET employee_id=%s,status=%s,started_at=NULL,completed_at=NULL WHERE id=%s',
+                    (employee_id, 'Pending', job_id))
+            execute("""INSERT INTO job_activity_history
+                       (job_id,actor_id,action,previous_status,new_status,comment)
+                       VALUES(%s,%s,'Reassigned',%s,'Pending',%s)""",
+                    (job_id, g.user['id'], job['status'], 'Job reassigned.'))
+            execute('INSERT INTO notifications(employee_id,job_id,message) VALUES(%s,%s,%s)',
+                    (employee_id, job_id, f'Job reassigned to you: {job["title"]}'))
+            if old_employee != employee_id:
+                execute('INSERT INTO notifications(employee_id,job_id,message) VALUES(%s,%s,%s)',
+                        (old_employee, job_id, 'A job was reassigned from you.'))
+            commit()
+            flash('Job reassigned.', 'success')
+            return redirect(url_for('department_jobs'))
+        execute('UPDATE job_assignments SET status=%s,started_at=NULL,completed_at=NULL WHERE id=%s',
+                (new_status, job_id))
+        execute("""INSERT INTO job_activity_history
+                   (job_id,actor_id,action,previous_status,new_status,comment)
+                   VALUES(%s,%s,%s,%s,%s,%s)""",
+                (job_id, g.user['id'], event, job['status'], new_status, request.form.get('comment', '').strip()))
+        execute('INSERT INTO notifications(employee_id,job_id,message) VALUES(%s,%s,%s)',
+                (job['employee_id'], job_id, f'Job "{job["title"]}" was {event.lower()}.'))
+        commit()
+        flash(f'Job {event.lower()}.', 'success')
+        return redirect(url_for('department_jobs'))
+
+    @app.get('/my-jobs.html')
+    def my_jobs():
+        jobs = query(
+            """SELECT j.*,d.name AS department,
+                      CASE WHEN j.status NOT IN ('Completed','Cancelled')
+                                AND j.due_date IS NOT NULL AND j.due_date<CURDATE()
+                           THEN 'Overdue' ELSE j.status END AS display_status
+               FROM job_assignments j JOIN departments d ON d.id=j.department_id
+               WHERE j.employee_id=%s ORDER BY j.due_date IS NULL,j.due_date,j.id DESC""",
+            (g.user['id'],))
+        counts = query(
+            """SELECT COUNT(*) AS total,
+                      SUM(status='Pending') AS pending,
+                      SUM(status='In Progress') AS in_progress,
+                      SUM(status='Completed') AS completed,
+                      SUM(status NOT IN ('Completed','Cancelled') AND due_date<CURDATE()) AS overdue
+               FROM job_assignments WHERE employee_id=%s""", (g.user['id'],), one=True)
+        return render_template('my-jobs.html', title='My jobs', jobs=jobs, counts=counts)
+
+    @app.post('/jobs/<int:job_id>/employee-action')
+    def job_employee_action(job_id):
+        action = request.form.get('action', '')
+        job = query('SELECT * FROM job_assignments WHERE id=%s AND employee_id=%s FOR UPDATE',
+                    (job_id, g.user['id']), one=True)
+        if not job:
+            abort(404)
+        transitions = {'start': ('Pending', 'In Progress'), 'complete': ('In Progress', 'Completed')}
+        if action not in transitions or job['status'] != transitions[action][0]:
+            raise ValueError('That job status transition is not allowed.')
+        new_status = transitions[action][1]
+        if action == 'start':
+            execute("UPDATE job_assignments SET status='In Progress',started_at=COALESCE(started_at,CURRENT_TIMESTAMP) WHERE id=%s",
+                    (job_id,))
+        else:
+            execute("UPDATE job_assignments SET status='Completed',completed_at=CURRENT_TIMESTAMP WHERE id=%s", (job_id,))
+        execute("""INSERT INTO job_activity_history
+                   (job_id,actor_id,action,previous_status,new_status,comment)
+                   VALUES(%s,%s,%s,%s,%s,%s)""",
+                (job_id, g.user['id'], action.title(), job['status'], new_status,
+                 request.form.get('comment', '').strip()))
+        admins = query("SELECT id FROM employees WHERE role='Admin' AND active=1")
+        for admin in admins:
+            execute('INSERT INTO notifications(employee_id,job_id,message) VALUES(%s,%s,%s)',
+                    (admin['id'], job_id, f'{g.user["name"]} marked "{job["title"]}" {new_status.lower()}.'))
+        commit()
+        flash('Job status updated.', 'success')
+        return redirect(url_for('my_jobs'))
+
+    @app.get('/notifications.html')
+    def notifications():
+        rows = query('SELECT * FROM notifications WHERE employee_id=%s ORDER BY created_at DESC LIMIT 100',
+                     (g.user['id'],))
+        execute('UPDATE notifications SET is_read=1 WHERE employee_id=%s', (g.user['id'],))
+        commit()
+        return render_template('records.html', title='Notifications', rows=rows,
+                               note='Notifications are stored in the database and marked read when opened.')

@@ -15,7 +15,7 @@ from db import connect
 # Parent tables precede child tables, so foreign keys remain enabled on restore.
 TABLES = {
     'branches': ('id', 'name', 'location', 'contact_number'),
-    'departments': ('id', 'branch_id', 'name'),
+    'departments': ('id', 'branch_id', 'name', 'description', 'manager_id', 'status', 'created_at', 'updated_at'),
     'customers': ('id', 'name', 'phone'),
     'employees': ('id', 'name', 'username', 'email', 'password_hash', 'role', 'active'),
     'categories': ('id', 'name'),
@@ -32,6 +32,12 @@ TABLES['products'] += ('description',)
 TABLES['sales'] += ('customer_id', 'branch_id')
 TABLES['purchases'] += ('order_id',)
 TABLES.update({
+    'company_finance': ('id', 'balance', 'updated_at'),
+    'employee_department_memberships': ('id', 'employee_id', 'department_id', 'assigned_at', 'assigned_by', 'is_active'),
+    'job_assignments': ('id', 'department_id', 'employee_id', 'title', 'description', 'priority', 'status',
+                        'assigned_by', 'assigned_at', 'due_date', 'started_at', 'completed_at', 'updated_at'),
+    'job_activity_history': ('id', 'job_id', 'actor_id', 'action', 'previous_status', 'new_status', 'comment', 'created_at'),
+    'notifications': ('id', 'employee_id', 'job_id', 'message', 'is_read', 'created_at'),
     'cashiers': ('employee_id', 'pos_terminal_id'),
     'procurement_officers': ('employee_id', 'approval_limit'),
     'accountants': ('employee_id', 'certification_number'),

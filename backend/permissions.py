@@ -26,6 +26,15 @@ ROLE_ACCESS = {
     'Purchasing': {**COMMON, **PURCHASING},
 }
 ROLE_ACCESS['Admin'].update({'staff_profiles': WRITE, 'payroll': WRITE, 'ledger': READ, 'data_quality': READ})
+ROLE_ACCESS['Admin'].update({'department_jobs': WRITE, 'department_create': ('POST',),
+                             'department_assign': ('POST',), 'department_manager': ('POST',),
+                             'department_status': ('POST',), 'job_create': ('POST',),
+                             'job_admin_action': ('POST',), 'my_jobs': READ,
+                             'job_employee_action': ('POST',), 'notifications': READ})
+ROLE_ACCESS['Admin'].update({'employee_delete': ('POST',), 'employee_pay': ('POST',),
+                             'payroll_process': ('POST',)})
+for role in ('Sales', 'Purchasing'):
+    ROLE_ACCESS[role].update({'my_jobs': READ, 'job_employee_action': ('POST',), 'notifications': READ})
 
 
 def allowed(role, endpoint, method='GET'):

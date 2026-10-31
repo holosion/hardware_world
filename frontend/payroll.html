@@ -1,5 +1,8 @@
 {% extends 'base.html' %}{% block content %}
-<section class="panel"><h2>Record monthly payroll</h2><form method="post">{{ csrf() }}
+<section class="panel"><h2>Record monthly payroll</h2>
+<form method="post" action="{{ url_for('payroll_process') }}">{{ csrf() }}<button class="button">Process current month salaries</button></form>
+<p class="muted small-text">This pays every active employee with a monthly salary that has not already been paid for the current month.</p>
+<form method="post">{{ csrf() }}
 <label>Employee<select name="employee_id" required>{% for e in employees %}<option value="{{ e.id }}">{{ e.name }}</option>{% endfor %}</select></label>
 <label>Month (first day)<input name="pay_month" type="date" required></label>
 <label>Gross pay<input name="gross_pay" type="number" min="0" step="0.01" required></label>

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="stats">
+  <article class="stat"><span>Total assigned</span><strong>{{ counts.total or 0 }}</strong></article>
+  <article class="stat"><span>Pending</span><strong>{{ counts.pending or 0 }}</strong></article>
+  <article class="stat"><span>In progress</span><strong>{{ counts.in_progress or 0 }}</strong></article>
+  <article class="stat"><span>Completed</span><strong>{{ counts.completed or 0 }}</strong></article>
+  <article class="stat"><span>Overdue</span><strong>{{ counts.overdue or 0 }}</strong></article>
+</div>
+<section class="panel"><h2>My assigned jobs</h2><div class="table-wrap"><table><thead><tr><th>Job</th><th>Department</th><th>Priority</th><th>Due</th><th>Status</th><th>Update</th></tr></thead>
+<tbody>{% for job in jobs %}<tr><td><strong>{{ job.title }}</strong><small>{{ job.description }}</small></td><td>{{ job.department }}</td><td>{{ job.priority }}</td><td>{{ job.due_date or '-' }}</td><td><span class="badge">{{ job.display_status }}</span></td><td>
+{% if job.status == 'Pending' %}<form method="post" action="{{ url_for('job_employee_action', job_id=job.id) }}">{{ csrf() }}<input type="hidden" name="action" value="start"><button class="button small">Start</button></form>
+{% elif job.status == 'In Progress' %}<form method="post" action="{{ url_for('job_employee_action', job_id=job.id) }}">{{ csrf() }}<input type="hidden" name="action" value="complete"><button class="button small">Complete</button></form>{% else %}-{% endif %}</td></tr>
+{% else %}<tr><td colspan="6" class="empty">No jobs assigned to you.</td></tr>{% endfor %}</tbody></table></div></section>
+{% endblock %}

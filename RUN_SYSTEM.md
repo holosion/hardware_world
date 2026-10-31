@@ -29,7 +29,7 @@ These commands run a local/LAN server, not an internet deployment. Public hostin
 
 ## First demonstration
 
-1. Admin: add a branch and departments, then create employee accounts.
+1. Admin: add a branch and departments, then create employee accounts. On Employees, choose the Department first and click Show jobs, then choose its Job and a System access role. Department and Job are required. Choosing Accountant automatically creates the matching accountants record through the employee subtype trigger. Edit an existing employee here to correct their job without changing their password.
 2. Admin: assign staff profiles, job types, supervisor and procurement approval limits. Existing employees initially have a provisional Cashier subtype; correct their actual jobs here.
 3. Add a category, supplier and product. Sales/Purchasing roles remain unchanged.
 4. Add a supplier-product catalogue entry, then create and receive a supplier order. Receiving twice is rejected.
@@ -66,3 +66,5 @@ backend/.venv/Scripts/python.exe backend/generate_diagram.py
 ```
 
 Tests create and remove their own random `hw_test_*` databases. Do not delete or recreate application tables for practice: use the separate practice database.
+
+Department jobs: Sales & Marketing -> Cashier; Procurement -> Procurement officer; Accounting -> Accountant; Human Resources -> HR staff; Management -> Branch manager. The Departments page offers these standard names. Employees and Staff profiles reject mismatched department/job assignments. Existing unassigned employees must be edited explicitly; their jobs are not guessed.

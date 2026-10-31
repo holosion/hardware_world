@@ -48,6 +48,13 @@ class StoreTests(unittest.TestCase):
             for table in reversed(TABLES):
                 execute(f'DELETE FROM {table}')
             execute('SET @restoring_snapshot=0')
+            from department_jobs import DEPARTMENT_JOBS
+            branch = execute('INSERT INTO branches(name,location) VALUES(%s,%s)', ('Fixture Branch','Kampala'))
+            self.job_departments = {}
+            for department_name, jobs in DEPARTMENT_JOBS.items():
+                department_id = execute('INSERT INTO departments(branch_id,name) VALUES(%s,%s)', (branch,department_name))
+                for job in jobs:
+                    self.job_departments[job] = department_id
             self.admin = execute('INSERT INTO employees (name,username,email,password_hash,role) VALUES (%s,%s,%s,%s,%s)',
                                  ('Test Admin', 'admin', 'admin@example.test', generate_password_hash('test-password'), 'Admin'))
             self.staff = execute('INSERT INTO employees (name,username,email,password_hash,role) VALUES (%s,%s,%s,%s,%s)',
@@ -66,6 +73,11 @@ class StoreTests(unittest.TestCase):
         with self.client.session_transaction() as session:
             token = session['csrf_token']
         values = dict(data or {})
+        if path == '/employees.html':
+            # Simulate a selected job in the employee form for existing account tests.
+            values.setdefault('job_type', 'Cashier')
+        if path in ('/employees.html', '/staff-profiles.html'):
+            values.setdefault('department_id', self.job_departments.get(values.get('job_type'), ''))
         values['csrf_token'] = token
         return self.client.post(path, data=values, follow_redirects=follow_redirects)
 
@@ -76,6 +88,75 @@ class StoreTests(unittest.TestCase):
     def read(self, sql, params=()):
         with self.app.app_context():
             return query(sql, params, one=True)
+
+    def test_hiring_each_job_creates_its_subtype(self):
+        from business import SUBTYPES
+        for index, (job, table) in enumerate(SUBTYPES.items()):
+            response = self.post('/employees.html', {'name': 'Job Test', 'username': f'job{index}',
+                'role': 'Sales', 'job_type': job, 'password': 'test-password'})
+            self.assertEqual(response.status_code, 302)
+            employee = self.read('SELECT id,job_type,role FROM employees WHERE username=%s', (f'job{index}',))
+            self.assertEqual(employee['job_type'], job)
+            self.assertEqual(employee['role'], 'Sales')
+            for subtype in SUBTYPES.values():
+                self.assertEqual(self.read(f'SELECT COUNT(*) AS n FROM {subtype} WHERE employee_id=%s',
+                                          (employee['id'],))['n'], int(subtype == table))
+        self.assertIn(b'Accountant', self.client.get('/employees.html').data)
+
+    def test_employee_job_edit_preserves_login_and_synchronizes_subtypes(self):
+        before = self.read('SELECT password_hash FROM employees WHERE id=%s', (self.staff,))
+        response = self.post('/employees.html', {'id': self.staff, 'name':'Test Staff',
+            'username':'staff', 'role':'Sales', 'job_type':'Accountant'})
+        self.assertEqual(response.status_code,302)
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM accountants WHERE employee_id=%s',(self.staff,))['n'],1)
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM cashiers WHERE employee_id=%s',(self.staff,))['n'],0)
+        self.assertEqual(self.read('SELECT password_hash FROM employees WHERE id=%s',(self.staff,)),before)
+        self.assertIn(b'value="Accountant" selected',self.client.get(f'/employees.html?edit={self.staff}').data)
+        self.assertEqual(self.login('staff').status_code,302)
+
+    def test_employee_job_and_department_validation(self):
+        data={'name':'New Accountant','username':'new.accountant','role':'Sales','password':'test-password','job_type':'Accountant'}
+        for job in ('', 'Unknown'):
+            self.assertEqual(self.post('/employees.html',dict(data,job_type=job)).status_code,400)
+        with self.client.session_transaction() as session:
+            token=session['csrf_token']
+        missing=dict(data,csrf_token=token)
+        del missing['job_type']
+        self.assertEqual(self.client.post('/employees.html',data=missing).status_code,400)
+        self.assertEqual(self.post('/employees.html',dict(data,department_id=999999)).status_code,400)
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM accountants')['n'],0)
+        with self.app.app_context():
+            branch=execute('INSERT INTO branches(name,location) VALUES(%s,%s)',('Test Branch','Kampala'))
+            department=execute('INSERT INTO departments(branch_id,name) VALUES(%s,%s)',(branch,'Accounting'))
+            get_db().commit()
+        self.assertEqual(self.post('/employees.html',dict(data,department_id=department)).status_code,302)
+        self.assertEqual(self.read('SELECT department_id FROM employees WHERE username=%s',('new.accountant',))['department_id'],department)
+
+    def test_department_first_form_filters_jobs_and_rejects_mismatch(self):
+        initial = self.client.get('/employees.html').data
+        self.assertIn(b'Choose a department first', initial)
+        self.assertNotIn(b'<option value="Accountant"', initial)
+        for job, department in self.job_departments.items():
+            page = self.client.get(f'/employees.html?department_id={department}').data
+            self.assertIn(f'<option value="{job}"'.encode(), page)
+            for other in self.job_departments:
+                if other != job:
+                    self.assertNotIn(f'<option value="{other}"'.encode(), page)
+            self.assertLess(page.index(b'1. Department'), page.index(b'2. Job'))
+        data = {'name':'Wrong Job', 'username':'wrong.job', 'role':'Sales', 'job_type':'Accountant',
+                'department_id':self.job_departments['Cashier'], 'password':'test-password'}
+        self.assertEqual(self.post('/employees.html',data).status_code,400)
+        self.assertIsNone(self.read('SELECT id FROM employees WHERE username=%s',('wrong.job',)))
+        self.assertEqual(self.post('/employees.html',dict(data,department_id='')).status_code,400)
+        self.assertEqual(self.post('/staff-profiles.html',{'employee_id':self.staff,'job_type':'Accountant',
+            'department_id':self.job_departments['Cashier'],'salary':'0','detail':'CPA'}).status_code,400)
+        self.assertEqual(self.read('SELECT job_type FROM employees WHERE id=%s',(self.staff,))['job_type'],'Cashier')
+
+    def test_department_choices_are_limited_to_supported_jobs(self):
+        page = self.client.get('/business/departments').data
+        self.assertIn(b'<option value="Accounting"',page)
+        branch = self.read('SELECT id FROM branches LIMIT 1')['id']
+        self.assertEqual(self.post('/business/departments',{'branch_id':branch,'name':'Unknown Department'}).status_code,400)
 
     def test_all_pages_render_without_javascript(self):
         for path in ('/', '/index.html', '/products.html', '/categories.html', '/suppliers.html',
@@ -88,7 +169,26 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
         self.assertIn(b'<option selected>Sales</option>', self.client.get('/employees.html').data)
         with self.app.app_context():
-            self.assertEqual(len(query('SHOW TABLES')), 20)
+            self.assertEqual(len(query('SHOW TABLES')), 24)
+
+    def test_department_job_lifecycle_and_ownership(self):
+        department = self.job_departments['Cashier']
+        self.assertEqual(self.post('/departments/assign', {
+            'employee_id': self.staff, 'department_id': department}).status_code, 302)
+        self.assertEqual(self.post('/jobs/create', {
+            'department_id': department, 'employee_id': self.staff,
+            'title': 'Verify cement stock', 'description': 'Reconcile physical quantities.',
+            'priority': 'High', 'due_date': '2026-11-05'}).status_code, 302)
+        job = self.read('SELECT * FROM job_assignments WHERE employee_id=%s', (self.staff,))
+        self.assertEqual(job['status'], 'Pending')
+        self.assertEqual(self.login('staff').status_code, 302)
+        self.assertIn(b'Verify cement stock', self.client.get('/my-jobs.html').data)
+        self.assertEqual(self.post(f'/jobs/{job["id"]}/employee-action', {'action': 'start'}).status_code, 302)
+        self.assertEqual(self.post(f'/jobs/{job["id"]}/employee-action', {'action': 'complete'}).status_code, 302)
+        self.assertEqual(self.read('SELECT status FROM job_assignments WHERE id=%s', (job['id'],))['status'], 'Completed')
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM job_activity_history WHERE job_id=%s',
+                                   (job['id'],))['n'], 3)
+        self.assertEqual(self.post(f'/jobs/{job["id"]}/admin-action', {'action': 'cancel'}).status_code, 403)
 
     def test_assignment_pages_and_entity_permissions(self):
         for path in ('/staff-profiles.html','/payroll.html','/ledger.html','/data-quality.html','/orders.html',
@@ -575,7 +675,7 @@ class StoreTests(unittest.TestCase):
                 with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
                     self.assertIn('products.csv', archive.namelist())
                     self.assertIn('manifest.json', archive.namelist())
-                    self.assertEqual(len(archive.namelist()), 21)
+                    self.assertEqual(len(archive.namelist()), 25)
             self.assertEqual(self.client.get(f'/backups/{folder.name}/secret.csv').status_code, 404)
             self.assertEqual(self.client.get('/backups/invalid/products.csv').status_code, 400)
             self.login('staff')

@@ -37,6 +37,96 @@ def upgrade(cursor):
                        'CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME=%s AND CONSTRAINT_NAME=%s', (table,name))
         if not cursor.fetchone():
             cursor.execute(f'ALTER TABLE {table} ADD CONSTRAINT {name} FOREIGN KEY ({column}) REFERENCES {parent}(id)')
+    # Department work management is additive so existing accounts and records remain intact.
+    department_columns = {
+        'description': "VARCHAR(500) NOT NULL DEFAULT ''",
+        'manager_id': 'INT NULL',
+        'status': "ENUM('Active','Inactive') NOT NULL DEFAULT 'Active'",
+        'created_at': 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP',
+        'updated_at': 'TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP',
+    }
+    cursor.execute('SHOW COLUMNS FROM departments')
+    existing = {row['Field'] for row in cursor.fetchall()}
+    for name, definition in department_columns.items():
+        if name not in existing:
+            cursor.execute(f'ALTER TABLE departments ADD COLUMN {name} {definition}')
+    for statement in (
+        """CREATE TABLE IF NOT EXISTS company_finance (
+            id TINYINT PRIMARY KEY,
+            balance DECIMAL(16,2) NOT NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            CHECK(balance >= 0)
+        ) ENGINE=InnoDB""",
+        """CREATE TABLE IF NOT EXISTS employee_department_memberships (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            employee_id INT NOT NULL,
+            department_id INT NOT NULL,
+            assigned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            assigned_by INT NOT NULL,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            FOREIGN KEY (employee_id) REFERENCES employees(id),
+            FOREIGN KEY (department_id) REFERENCES departments(id),
+            FOREIGN KEY (assigned_by) REFERENCES employees(id),
+            INDEX ix_membership_employee_active (employee_id,is_active),
+            INDEX ix_membership_department_active (department_id,is_active)
+        ) ENGINE=InnoDB""",
+        """CREATE TABLE IF NOT EXISTS job_assignments (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            department_id INT NOT NULL,
+            employee_id INT NOT NULL,
+            title VARCHAR(150) NOT NULL,
+            description VARCHAR(2000) NOT NULL DEFAULT '',
+            priority ENUM('Low','Medium','High','Urgent') NOT NULL DEFAULT 'Medium',
+            status ENUM('Pending','In Progress','Completed','Cancelled') NOT NULL DEFAULT 'Pending',
+            assigned_by INT NOT NULL,
+            assigned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            due_date DATE NULL,
+            started_at TIMESTAMP NULL,
+            completed_at TIMESTAMP NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            FOREIGN KEY (department_id) REFERENCES departments(id),
+            FOREIGN KEY (employee_id) REFERENCES employees(id),
+            FOREIGN KEY (assigned_by) REFERENCES employees(id),
+            INDEX ix_jobs_employee_status (employee_id,status),
+            INDEX ix_jobs_department_status (department_id,status),
+            INDEX ix_jobs_due_date (due_date)
+        ) ENGINE=InnoDB""",
+        """CREATE TABLE IF NOT EXISTS job_activity_history (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            job_id INT NOT NULL,
+            actor_id INT NOT NULL,
+            action VARCHAR(50) NOT NULL,
+            previous_status VARCHAR(30) NULL,
+            new_status VARCHAR(30) NULL,
+            comment VARCHAR(1000) NOT NULL DEFAULT '',
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (job_id) REFERENCES job_assignments(id) ON DELETE CASCADE,
+            FOREIGN KEY (actor_id) REFERENCES employees(id),
+            INDEX ix_job_activity_job_created (job_id,created_at)
+        ) ENGINE=InnoDB""",
+        """CREATE TABLE IF NOT EXISTS notifications (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            employee_id INT NOT NULL,
+            job_id INT NULL,
+            message VARCHAR(500) NOT NULL,
+            is_read BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+            FOREIGN KEY (job_id) REFERENCES job_assignments(id) ON DELETE SET NULL,
+            INDEX ix_notifications_employee_read (employee_id,is_read,created_at)
+        ) ENGINE=InnoDB""",
+    ):
+        cursor.execute(statement)
+    cursor.execute(
+        "INSERT IGNORE INTO company_finance(id,balance) VALUES(1,800000000.00)")
+    # Existing department assignments become the first membership record.
+    cursor.execute(
+        """INSERT INTO employee_department_memberships
+           (employee_id,department_id,assigned_by)
+           SELECT e.id,e.department_id,e.id FROM employees e
+           LEFT JOIN employee_department_memberships m
+             ON m.employee_id=e.id AND m.department_id=e.department_id AND m.is_active=1
+           WHERE e.department_id IS NOT NULL AND m.id IS NULL""")
     cursor.execute("SHOW INDEX FROM sale_items WHERE Key_name='uq_sale_product'")
     if not cursor.fetchone():
         cursor.execute('ALTER TABLE sale_items ADD CONSTRAINT uq_sale_product UNIQUE(sale_id,product_id)')

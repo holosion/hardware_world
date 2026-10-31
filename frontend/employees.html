@@ -3,11 +3,35 @@
   <div class="content-grid">
     <section class="panel">
       <h2>{{ 'Edit employee' if editing else 'Add employee' }}</h2>
+      <form method="get" action="{{ url_for('employees') }}">
+        {% if editing %}<input type="hidden" name="edit" value="{{ editing.id }}">{% endif %}
+        <label>1. Department<select name="department_id" required>
+          <option value="">Choose a department first</option>
+          {% for department in departments %}
+            <option value="{{ department.id }}" {{ 'selected' if selected_department == department.id else '' }}>{{ department.name }}</option>
+          {% endfor %}
+        </select></label>
+        <button class="button secondary" {{ 'disabled' if not departments else '' }}>Show jobs</button>
+      </form>
+      {% if not departments %}
+        <p>Add a <a href="{{ url_for('business_records', entity='departments') }}">department</a> before creating employees.</p>
+      {% elif selected and not jobs %}
+        <p>This department has no supported jobs. Use Sales &amp; Marketing, Procurement, Accounting, Human Resources or Management.</p>
+      {% else %}
+        <p class="muted small-text">Choose the department and click Show jobs before entering employee details.</p>
+      {% endif %}
       <form method="post">
         {{ csrf() }}
+        <input type="hidden" name="department_id" value="{{ selected_department or '' }}">
         {% if editing %}
           <input type="hidden" name="id" value="{{ editing.id }}">
         {% endif %}
+        <label>2. Job in {{ selected.department_name if selected else 'the selected department' }}<select name="job_type" required {{ 'disabled' if not jobs else '' }}>
+          <option value="">{{ "Choose the employee's job" if jobs else 'Select a department and click Show jobs' }}</option>
+          {% for job in jobs %}
+            <option value="{{ job }}" {{ 'selected' if editing and editing.job_type == job else '' }}>{{ job_labels[job] }}</option>
+          {% endfor %}
+        </select></label>
         <label>
           Full name<input name="name"
        maxlength="100"
@@ -32,11 +56,15 @@
        value="{{ editing.email or '' if editing else '' }}">
         </label>
         <label>
-          Department / role<select name="role">
+          System access role<select name="role">
           {% for role in roles %}
             <option {{ 'selected' if (editing.role if editing else 'Sales') == role else '' }}>{{ role }}</option>
           {% endfor %}
           </select>
+        </label>
+        <label>
+          Monthly salary ({{ currency }})<input name="salary" type="number" min="0" step="0.01"
+       value="{{ editing.salary if editing else '0' }}" required>
         </label>
         <label>
           {{ 'New password (leave blank to keep current)' if editing else 'Password' }}<input type="password"
@@ -46,12 +74,14 @@
        {{ 'required' if not editing else '' }}>
         </label>
         <div class="form-actions">
-          <button class="button">Save employee</button>
+          <button class="button" {{ 'disabled' if not jobs else '' }}>Save employee</button>
           {% if editing %}
             <a href="{{ url_for('employees') }}">Cancel</a>
           {% endif %}
         </div>
       </form>
+      <p class="muted small-text">Job describes the employee's work and creates the matching job record, such as Accountant in the accountants table. Department identifies where they work. System access role controls which pages they can use.</p>
+      <p class="muted small-text">Use <a href="{{ url_for('staff_profiles') }}">Staff profiles</a> for certification numbers, approval limits and other job details. Changing a job removes its previous subtype details.</p>
       <p class="muted small-text">Sales staff record sales and view stock. Purchasing staff manage products, categories, suppliers, and purchases. Admins have full access.</p>
     </section>
     <section class="panel">
@@ -64,6 +94,9 @@
               <th>Username</th>
               <th>Email</th>
               <th>Department</th>
+              <th>Job</th>
+              <th>Access role</th>
+              <th>Monthly salary</th>
               <th>Status</th>
               <th>Actions</th>
             </tr>
@@ -74,13 +107,26 @@
                 <td>{{ row.name }}</td>
                 <td>{{ row.username }}</td>
                 <td>{{ row.email or '-' }}</td>
+                <td>{{ row.department or 'Unassigned' }}</td>
+                <td>{{ {'ProcurementOfficer':'Procurement officer','HRStaff':'HR staff','BranchManager':'Branch manager'}.get(row.job_type, row.job_type) }}</td>
                 <td>{{ row.role }}</td>
+                <td>{{ row.salary | money }}</td>
                 <td>
                   <span class="badge {{ 'good' if row.active else '' }}">{{ 'Active' if row.active else 'Inactive' }}</span>
                 </td>
                 <td class="actions">
                   <a href="{{ url_for('employees', edit=row.id) }}">Edit</a>
                   {% if row.id != user.id %}
+                    {% if row.active and row.salary > 0 %}
+                      <form method="post" action="{{ url_for('employee_pay', record_id=row.id) }}">
+                        {{ csrf() }}
+                        <button class="text-button">Pay</button>
+                      </form>
+                    {% endif %}
+                    <form method="post" action="{{ url_for('delete_employee', record_id=row.id) }}">
+                      {{ csrf() }}
+                      <button class="text-button">Delete</button>
+                    </form>
                     <form method="post"
                           action="{{ url_for('toggle_employee', record_id=row.id) }}">
                       {{ csrf() }}

@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block content %}
+{% if user.role == 'Admin' %}
+<div class="content-grid">
+  <section class="panel">
+    <h2>Create department</h2>
+    <form method="post" action="{{ url_for('department_create') }}">{{ csrf() }}
+      <label>Name<input name="name" maxlength="100" required></label>
+      <label>Description<textarea name="description" maxlength="500"></textarea></label>
+      <label>Branch<select name="branch_id" required><option value="">Choose branch</option>
+        {% for branch in branches|default([]) %}<option value="{{ branch.id }}">{{ branch.name }}</option>{% endfor %}
+      </select></label>
+      <button class="button">Create department</button>
+    </form>
+    <p class="muted small-text">Create branches first when no branch is available.</p>
+  </section>
+  <section class="panel">
+    <h2>Assign employee</h2>
+    <form method="post" action="{{ url_for('department_assign') }}">{{ csrf() }}
+      <label>Employee<select name="employee_id" required>{% for employee in active_employees %}
+        <option value="{{ employee.id }}">{{ employee.name }}</option>{% endfor %}</select></label>
+      <label>Department<select name="department_id" required>{% for department in departments if department.status == 'Active' %}
+        <option value="{{ department.id }}">{{ department.name }}</option>{% endfor %}</select></label>
+      <button class="button">Assign employee</button>
+    </form>
+  </section>
+</div>
+<section class="panel">
+  <h2>Assign a job</h2>
+  <form method="post" action="{{ url_for('job_create') }}" class="content-grid">{{ csrf() }}
+    <label>Department<select name="department_id" required>{% for department in departments if department.status == 'Active' %}
+      <option value="{{ department.id }}">{{ department.name }}</option>{% endfor %}</select></label>
+    <label>Employee<select name="employee_id" required>{% for employee in active_employees %}
+      <option value="{{ employee.id }}">{{ employee.name }}{% if employee.department %} — {{ employee.department }}{% endif %}</option>{% endfor %}</select></label>
+    <label>Title<input name="title" maxlength="150" required></label>
+    <label>Priority<select name="priority"><option>Low</option><option selected>Medium</option><option>High</option><option>Urgent</option></select></label>
+    <label>Due date<input name="due_date" type="date"></label>
+    <label>Description<textarea name="description" maxlength="2000"></textarea></label>
+    <button class="button">Assign job</button>
+  </form>
+</section>
+{% endif %}
+<section class="panel">
+  <h2>Department performance</h2>
+  <div class="table-wrap"><table><thead><tr><th>Department</th><th>Employees</th><th>Total jobs</th><th>Completed</th><th>Completion</th><th>Management</th></tr></thead>
+  <tbody>{% for department in departments %}<tr><td>{{ department.name }}<small>{{ department.manager or 'No manager' }}</small></td><td>{{ department.employee_count }}</td><td>{{ department.job_count }}</td><td>{{ department.completed_count }}</td><td>{{ ((department.completed_count / department.job_count) * 100)|round(0) if department.job_count else 0 }}%</td><td>{% if user.role == 'Admin' %}<form method="post" action="{{ url_for('department_manager') }}">{{ csrf() }}<input type="hidden" name="department_id" value="{{ department.id }}"><select name="manager_id"><option value="">No manager</option>{% for employee in active_employees if employee.department_id == department.id %}<option value="{{ employee.id }}" {{ 'selected' if employee.id == department.manager_id else '' }}>{{ employee.name }}</option>{% endfor %}</select><button class="text-button">Save</button></form><form method="post" action="{{ url_for('department_status', department_id=department.id) }}">{{ csrf() }}<button class="text-button">{{ 'Deactivate' if department.status == 'Active' else 'Activate' }}</button></form>{% endif %}</td></tr>
+  {% else %}<tr><td colspan="6" class="empty">No departments yet.</td></tr>{% endfor %}</tbody></table></div>
+</section>
+<section class="panel">
+  <h2>Job monitoring</h2>
+  <div class="table-wrap"><table><thead><tr><th>Job</th><th>Department</th><th>Employee</th><th>Priority</th><th>Status</th><th>Due</th><th>Action</th></tr></thead>
+  <tbody>{% for job in jobs %}<tr><td><strong>{{ job.title }}</strong><small>{{ job.description }}</small></td><td>{{ job.department }}</td><td>{{ job.employee }}</td><td>{{ job.priority }}</td><td><span class="badge">{{ job.display_status }}</span></td><td>{{ job.due_date or '-' }}</td><td>{% if user.role == 'Admin' %}
+    {% if job.status not in ('Completed','Cancelled') %}<form method="post" action="{{ url_for('job_admin_action', job_id=job.id) }}">{{ csrf() }}<input type="hidden" name="action" value="cancel"><button class="text-button">Cancel</button></form>{% endif %}
+    {% if job.status == 'Cancelled' %}<form method="post" action="{{ url_for('job_admin_action', job_id=job.id) }}">{{ csrf() }}<input type="hidden" name="action" value="reopen"><button class="text-button">Reopen</button></form>{% endif %}
+    {% endif %}</td></tr>{% else %}<tr><td colspan="7" class="empty">No jobs assigned yet.</td></tr>{% endfor %}</tbody></table></div>
+</section>
+{% endblock %}
