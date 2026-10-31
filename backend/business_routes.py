@@ -5,7 +5,7 @@ from decimal import Decimal
 from flask import abort, flash, g, redirect, render_template, request, url_for
 from business import SUBTYPES
 from department_jobs import DEPARTMENT_JOBS, validate_assignment
-from db import commit, execute, query
+from db import commit, deduct_company_funds, execute, query
 
 # Each form names a fixed table and fixed columns. URL/form values never become SQL identifiers.
 CATALOG = {
@@ -139,6 +139,8 @@ def register_business_routes(app):
         if order['status'] != 'Pending': raise ValueError('This order has already been received.')
         items = query('SELECT * FROM purchase_order_items WHERE order_id=%s ORDER BY product_id',(order_id,))
         if not items: raise ValueError('An empty order cannot be received.')
+        total = sum(item['quantity'] * item['unit_cost'] for item in items)
+        deduct_company_funds(total)
         for item in items:
             query('SELECT id FROM products WHERE id=%s FOR UPDATE',(item['product_id'],),one=True)
             execute('INSERT INTO purchases(supplier_id,product_id,employee_id,quantity,unit_cost,order_id) VALUES(%s,%s,%s,%s,%s,%s)',
@@ -146,7 +148,7 @@ def register_business_routes(app):
             execute('UPDATE products SET stock=stock+%s WHERE id=%s',(item['quantity'],item['product_id']))
         execute("UPDATE purchase_orders SET status='Received' WHERE id=%s",(order_id,))
         commit()
-        flash('Order received once and stock updated.', 'success')
+        flash(f'Order received for {total:,.2f}. Company funds and stock were updated.', 'success')
         return redirect(url_for('orders'))
 
     @app.get('/data-quality.html')

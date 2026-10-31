@@ -1,5 +1,5 @@
 {% extends 'base.html' %}{% block content %}
-<section class="panel"><h2>Place supplier order</h2><p>One line per order in this simple form. The database supports multiple lines. Receiving an order creates delivery records and increases stock.</p><form method="post">{{ csrf() }}
+<section class="panel"><h2>Place supplier order</h2><p>One line per order in this simple form. The database supports multiple lines. Company funds are deducted only when the order is received.</p><form method="post">{{ csrf() }}
 <label>Supplier<select name="supplier_id" required>{% for r in suppliers %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}</select></label>
 <label>Product<select name="product_id" required>{% for r in products %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}</select></label>
 <label>Quantity<input name="quantity" type="number" min="1" max="1000000" required></label>

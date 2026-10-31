@@ -32,7 +32,7 @@ These commands run a local/LAN server, not an internet deployment. Public hostin
 1. Admin: add a branch and departments, then create employee accounts. On Employees, choose the Department first and click Show jobs, then choose its Job and a System access role. Department and Job are required. Choosing Accountant automatically creates the matching accountants record through the employee subtype trigger. Edit an existing employee here to correct their job without changing their password.
 2. Admin: assign staff profiles, job types, supervisor and procurement approval limits. Existing employees initially have a provisional Cashier subtype; correct their actual jobs here.
 3. Add a category, supplier and product. Sales/Purchasing roles remain unchanged.
-4. Add a supplier-product catalogue entry, then create and receive a supplier order. Receiving twice is rejected.
+4. Add a supplier-product catalogue entry, then create and receive a supplier order. Receiving stock deducts quantity × unit cost from company funds; insufficient funds reject the receipt, and receiving twice is rejected.
 5. Add a registered customer. Record a sale, optionally selecting the customer and branch.
 6. View the receipt and download the Word document. Stock has decreased and the ledger has a positive sale entry.
 7. Admin: record payroll with the first date of the month. Check calculated net pay and the negative ledger entry.

@@ -11,7 +11,8 @@ import pymysql
 from flask import Flask, abort, flash, g, redirect, render_template, request, send_file, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from db import ROOT, close_db, commit, connect, connection_settings, execute, get_db, initialize, query, username_from_name
+from db import (ROOT, close_db, commit, connect, connection_settings, deduct_company_funds,
+                execute, get_db, initialize, query, username_from_name)
 from backup import TABLES, backup_folder, create_backup, list_backups, load_backup, restore_backup, zip_backup
 from permissions import ROLES, allowed
 from business import SUBTYPES
@@ -338,11 +339,13 @@ def create_app(test_config=None):
             product = query('SELECT id FROM products WHERE id=%s FOR UPDATE', (product_id,), one=True)
             if not product:
                 raise ValueError('Choose an existing product.')
+            total = quantity * unit_cost
+            deduct_company_funds(total)
             execute('INSERT INTO purchases (supplier_id,product_id,employee_id,quantity,unit_cost) VALUES (%s,%s,%s,%s,%s)',
                     (supplier_id, product_id, g.user['id'], quantity, unit_cost))
             execute('UPDATE products SET stock=stock+%s WHERE id=%s', (quantity, product_id))
             commit()
-            flash('Purchase received. Stock has been increased.', 'success')
+            flash(f'Purchase received for {total:,.2f}. Company funds and stock were updated.', 'success')
             return redirect(url_for('purchases'))
         rows = query('SELECT pu.*, p.name AS product, s.name AS supplier, e.name AS employee, '
                      'pu.quantity*pu.unit_cost AS total FROM purchases pu JOIN products p ON p.id=pu.product_id '

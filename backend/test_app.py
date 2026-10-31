@@ -298,10 +298,13 @@ class StoreTests(unittest.TestCase):
                     cursor.execute(f'DROP DATABASE `{target["database"]}`')
 
     def test_purchase_then_sale_updates_stock_receipt_and_dashboard(self):
+        starting_balance = self.read('SELECT balance FROM company_finance WHERE id=1')['balance']
         response = self.post('/purchase-orders.html', {'supplier_id': self.supplier,
                              'product_id': self.product, 'quantity': 5, 'unit_cost': '12.25'})
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.read('SELECT stock FROM products WHERE id=%s', (self.product,))['stock'], 15)
+        self.assertEqual(self.read('SELECT balance FROM company_finance WHERE id=1')['balance'],
+                         starting_balance - Decimal('61.25'))
         response = self.post('/sales.html', {'product_id': [str(self.product), '', ''],
                              'quantity': ['3', '1', '1'], 'customer_name': 'Jane'}, follow_redirects=True)
         self.assertEqual(response.status_code, 200)
@@ -313,6 +316,17 @@ class StoreTests(unittest.TestCase):
             execute('UPDATE products SET price=99 WHERE id=%s', (self.product,))
             get_db().commit()
         self.assertEqual(self.read('SELECT unit_price FROM sale_items')['unit_price'], Decimal('20.50'))
+
+    def test_stock_purchase_rejects_insufficient_company_funds_atomically(self):
+        with self.app.app_context():
+            execute('UPDATE company_finance SET balance=100.00 WHERE id=1')
+            get_db().commit()
+        response = self.post('/purchase-orders.html', {'supplier_id': self.supplier,
+                             'product_id': self.product, 'quantity': 2, 'unit_cost': '60.00'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.read('SELECT stock FROM products WHERE id=%s', (self.product,))['stock'], 10)
+        self.assertEqual(self.read('SELECT balance FROM company_finance WHERE id=1')['balance'], Decimal('100.00'))
+        self.assertEqual(self.read('SELECT COUNT(*) AS n FROM purchases')['n'], 0)
 
     def test_sale_rolls_back_all_items_when_one_is_out_of_stock(self):
         response = self.post('/sales.html', {'product_id': [str(self.product), str(self.second)],

@@ -63,6 +63,16 @@ def commit():
     g.committed_change = True
 
 
+def deduct_company_funds(amount):
+    """Reserve and deduct funds for a stock or payroll payment in this transaction."""
+    account = query('SELECT balance FROM company_finance WHERE id=1 FOR UPDATE', one=True)
+    if not account:
+        raise ValueError('Company funds account is not initialized.')
+    if account['balance'] < amount:
+        raise ValueError('Company funds are insufficient for this stock purchase.')
+    execute('UPDATE company_finance SET balance=balance-%s WHERE id=1', (amount,))
+
+
 def initialize(settings):
     name = settings['database']
     if not re.fullmatch(r'[A-Za-z0-9_]+', name):
