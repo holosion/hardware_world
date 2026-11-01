@@ -86,6 +86,22 @@ class StoreTests(unittest.TestCase):
         department = department or ('Admin' if username == 'admin' else 'Purchasing' if username == 'buyer' else 'Sales')
         return self.post('/login', {'username': username, 'password': password, 'department': department})
 
+    def test_sale_reduces_catalogue_price_and_preserves_receipt_price(self):
+        before = self.read("SELECT COALESCE(SUM(amount),0) AS revenue FROM ledger_entries WHERE source_type='Sale'")
+        response = self.post('/sales.html', {'product_id': [self.product, '', ''],
+                                             'quantity': ['2', '1', '1']})
+        self.assertEqual(response.status_code, 302)
+        product = self.read('SELECT price, stock FROM products WHERE id=%s', (self.product,))
+        self.assertEqual(product['price'], Decimal('20.30'))
+        self.assertEqual(product['stock'], 8)
+        item = self.read('SELECT unit_price FROM sale_items WHERE product_id=%s', (self.product,))
+        self.assertEqual(item['unit_price'], Decimal('20.50'))
+        after = self.read("SELECT COALESCE(SUM(amount),0) AS revenue FROM ledger_entries WHERE source_type='Sale'")
+        self.assertEqual(after['revenue'] - before['revenue'], Decimal('41.00'))
+        dashboard = self.client.get('/').data
+        self.assertIn(b'41.00', dashboard)
+        self.assertIn(b'20.30', dashboard)
+
     def read(self, sql, params=()):
         with self.app.app_context():
             return query(sql, params, one=True)

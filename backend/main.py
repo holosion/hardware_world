@@ -174,14 +174,19 @@ def create_app(test_config=None):
                        'COALESCE(SUM(stock <= reorder_level),0) AS low_stock FROM products', one=True)
         company_finance = query('SELECT balance FROM company_finance WHERE id=1', one=True)
         low_stock = query('SELECT * FROM products WHERE stock <= reorder_level ORDER BY stock, name LIMIT 8')
+        catalogue = query('SELECT id, name, price, stock FROM products ORDER BY name LIMIT 8')
         totals, recent = None, []
         if can_access('sales'):
-            totals = query('SELECT COALESCE(SUM(si.quantity*si.unit_price),0) AS revenue, '
-                           'COUNT(DISTINCT s.id) AS sales FROM sales s JOIN sale_items si ON si.sale_id=s.id', one=True)
-            recent = query('SELECT s.id, s.customer_name, s.created_at, SUM(si.quantity*si.unit_price) AS total '
-                           'FROM sales s JOIN sale_items si ON si.sale_id=s.id GROUP BY s.id ORDER BY s.id DESC LIMIT 5')
+            totals = query("SELECT COALESCE(SUM(le.amount),0) AS revenue, COUNT(DISTINCT s.id) AS sales "
+                           "FROM sales s LEFT JOIN ledger_entries le "
+                           "ON le.sale_id=s.id AND le.source_type='Sale'", one=True)
+            recent = query("SELECT s.id, s.customer_name, s.created_at, COALESCE(le.amount,0) AS total "
+                           "FROM sales s LEFT JOIN ledger_entries le "
+                           "ON le.sale_id=s.id AND le.source_type='Sale' "
+                           "ORDER BY s.id DESC LIMIT 5")
         return render_template('index.html', title='Dashboard', counts=counts, totals=totals,
-                               low_stock=low_stock, recent=recent, company_finance=company_finance)
+                               low_stock=low_stock, catalogue=catalogue, recent=recent,
+                               company_finance=company_finance)
 
     @app.route('/categories.html', methods=['GET', 'POST'])
     def categories():
@@ -293,7 +298,8 @@ def create_app(test_config=None):
                     raise ValueError('Insufficient stock for one of the selected products. No sale was saved.')
                 execute('INSERT INTO sale_items (sale_id,product_id,quantity,unit_price) VALUES (%s,%s,%s,%s)',
                         (sale_id, product_id, quantity, product['price']))
-                execute('UPDATE products SET stock=stock-%s WHERE id=%s', (quantity, product_id))
+                execute('UPDATE products SET stock=stock-%s, price=ROUND(price*0.99, 2) WHERE id=%s',
+                        (quantity, product_id))
             commit()
             try:
                 from receipts import save_receipt
